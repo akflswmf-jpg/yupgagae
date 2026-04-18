@@ -1,0 +1,1 @@
+enum BoardType { free, industry }
