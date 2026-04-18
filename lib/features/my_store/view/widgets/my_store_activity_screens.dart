@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 import 'package:yupgagae/features/community/domain/comment.dart';
+import 'package:yupgagae/features/community/domain/industry_catalog.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/my_store/controller/my_store_controller.dart';
 import 'package:yupgagae/features/my_store/view/widgets/my_store_common_widgets.dart';
@@ -134,6 +135,29 @@ class MyPostsScreen extends StatelessWidget {
                               ),
                             ),
                           ),
+                          if (post.industryId != null &&
+                              post.industryId!.isNotEmpty) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF3F4F6),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                IndustryCatalog.nameOf(post.industryId,
+                                    fallback: ''),
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: Color(0xFF6B7280),
+                                ),
+                              ),
+                            ),
+                          ],
                           const Spacer(),
                           Text(
                             _timeLabel(post.createdAt),

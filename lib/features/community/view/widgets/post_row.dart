@@ -34,7 +34,10 @@ class PostRow extends StatelessWidget {
         : previewSource;
 
     final thumbPath = post.imagePaths.isNotEmpty ? post.imagePaths.first : null;
-    final likeColor = liked ? const Color(0xFFCC5A4E) : const Color(0xFF6B7280);
+
+    // 🔥 여기 핵심 수정
+    final likeColor =
+        liked ? const Color(0xFFA56E5F) : const Color(0xFF6B7280);
 
     return RepaintBoundary(
       child: Material(
@@ -181,7 +184,7 @@ class _Thumb extends StatelessWidget {
   ImageProvider _provider(File file) {
     return ResizeImage(
       FileImage(file),
-      width: 160, // 🔥 더 줄여서 decode 부담 감소
+      width: 160,
     );
   }
 
@@ -208,8 +211,6 @@ class _Thumb extends StatelessWidget {
             fit: BoxFit.cover,
             filterQuality: FilterQuality.none,
             gaplessPlayback: true,
-
-            // 🔥 핵심: lazy 렌더링
             frameBuilder: (context, child, frame, wasSync) {
               if (wasSync || frame != null) {
                 return child;
@@ -223,7 +224,6 @@ class _Thumb extends StatelessWidget {
                 ),
               );
             },
-
             errorBuilder: (_, __, ___) {
               return const _ErrorThumb();
             },

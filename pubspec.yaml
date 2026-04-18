@@ -16,7 +16,6 @@ dependencies:
   shared_preferences: ^2.2.3
   image_picker: ^1.0.7
   path_provider: ^2.1.5
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -30,16 +29,13 @@ flutter_launcher_icons:
   image_path: assets/icon/app_icon.png
   min_sdk_android: 21
   remove_alpha_ios: true
-  adaptive_icon_background: "#A56E5F"
-  adaptive_icon_foreground: assets/icon/icon_foreground.png
 
 flutter_native_splash:
-  color: "#A56E5F"
-  image: assets/icon/icon_foreground.png
+  color: "#FFFFFF"
   android_12:
+    color: "#FFFFFF"
     image: assets/icon/icon_foreground.png
-    color: "#A56E5F"
-    icon_background_color: "#A56E5F"
+    icon_background_color: "#FFFFFF"
   web: false
 
 flutter:
@@ -47,3 +43,4 @@ flutter:
 
   assets:
     - assets/icon/app_icon.png
+    - assets/icon/icon_foreground.png

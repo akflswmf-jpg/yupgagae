@@ -72,7 +72,7 @@ class IndustryCatalog {
     ),
     IndustryItem(
       id: 'unmanned',
-      name: '무인점',
+      name: '편의점/무인점',
       icon: Icons.smart_toy_rounded,
       color: Color(0xFF546E7A),
     ),
@@ -81,6 +81,12 @@ class IndustryCatalog {
       name: '반려동물/애견샵',
       icon: Icons.pets_rounded,
       color: Color(0xFF6A1B9A),
+    ),
+    IndustryItem(
+      id: 'etc',
+      name: '기타',
+      icon: Icons.category_rounded,
+      color: Color(0xFF78909C),
     ),
   ];
 

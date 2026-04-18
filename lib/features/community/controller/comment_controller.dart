@@ -534,9 +534,7 @@ class CommentController extends GetxController {
       throw Exception('내용이 비어 있습니다.');
     }
 
-    final dynamic repoDyn = repo;
-
-    final updated = await repoDyn.updateComment(
+    final updated = await repo.updateComment(
       postId: postId,
       commentId: commentId,
       userId: currentUserId,

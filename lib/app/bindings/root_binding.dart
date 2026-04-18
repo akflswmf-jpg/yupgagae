@@ -23,14 +23,14 @@ class RootBinding extends Bindings {
     _bindOwnerBoardController();
     _bindHomeFeedController();
 
-    // RootShell의 IndexedStack에서 바로 쓰는 탭 의존성도 여기서 선등록
     MyStoreBinding().dependencies();
     RevenueBinding().dependencies();
   }
 
   void _requireAnonSession() {
+    // ❗ 여기 핵심 수정
     if (!Get.isRegistered<AnonSessionService>()) {
-      Get.put<AnonSessionService>(AnonSessionService(), permanent: true);
+      throw Exception('AnonSessionService must be initialized in main.dart');
     }
   }
 

@@ -23,8 +23,12 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
   final TextEditingController _inputCtrl = TextEditingController();
   final FocusNode _focusNode = FocusNode();
 
-  /// 등록/수정 중 중복 입력 방지용
   final RxBool _isSubmittingLocal = false.obs;
+
+  // 뒤로가기 중복 방지
+  bool _isPopping = false;
+  // 답글/수정 성공 시 부모에 알림
+  bool _didSubmit = false;
 
   String _postId = '';
   String _rootCommentId = '';
@@ -111,7 +115,6 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
 
   String _timeLabel(DateTime dt) {
     final diff = DateTime.now().difference(dt);
-
     if (diff.inMinutes < 1) return '방금';
     if (diff.inMinutes < 60) return '${diff.inMinutes}분 전';
     if (diff.inHours < 24) return '${diff.inHours}시간 전';
@@ -127,26 +130,17 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     _focusNode.unfocus();
   }
 
-  Future<void> _settleKeyboard() async {
-    _dismissKeyboard();
-    await Future.delayed(const Duration(milliseconds: 240));
-  }
-
+  // 제출 전 키보드를 내린 뒤 키보드 애니메이션이 완료될 시간을 확보한다.
+  // 키보드 dismiss 중 Obx 리빌드가 겹치면 프레임 드랍이 생기기 때문이다.
   Future<void> _settleKeyboardForSubmit() async {
     _dismissKeyboard();
     await WidgetsBinding.instance.endOfFrame;
-    await Future.delayed(const Duration(milliseconds: 180));
-  }
-
-  Future<void> _handleWillPop() async {
-    await _settleKeyboard();
+    await Future.delayed(const Duration(milliseconds: 280));
   }
 
   void _scrollToBottom({bool animated = false}) {
     if (!mounted || !_scrollController.hasClients) return;
-
     final target = _scrollController.position.maxScrollExtent;
-
     if (animated) {
       _scrollController.animateTo(
         target,
@@ -155,7 +149,6 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
       );
       return;
     }
-
     _scrollController.jumpTo(target);
   }
 
@@ -168,10 +161,6 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     _isSubmittingLocal.value = true;
 
     try {
-      // 일반 댓글과 동일한 방식:
-      // 1) 키보드 먼저 안정적으로 내리고
-      // 2) 그 다음 상태 변경
-      // 3) 입력 clear / scroll은 뒤로 분리
       await _settleKeyboardForSubmit();
 
       if (_editingCommentId != null) {
@@ -188,6 +177,7 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
         _showSnack('답글을 등록했어요.');
       }
 
+      _didSubmit = true;
       _inputCtrl.clear();
 
       if (!mounted) return;
@@ -249,7 +239,7 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     );
     if (!ok) return;
 
-    await _settleKeyboard();
+    _dismissKeyboard();
 
     try {
       await c.delete(comment.id);
@@ -267,7 +257,7 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     final reason = await _showReasonPicker(title: '댓글 신고');
     if (reason == null) return;
 
-    await _settleKeyboard();
+    _dismissKeyboard();
 
     try {
       await c.report(
@@ -310,13 +300,10 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
         );
       },
     );
-
     return result ?? false;
   }
 
-  Future<String?> _showReasonPicker({
-    required String title,
-  }) async {
+  Future<String?> _showReasonPicker({required String title}) async {
     const reasons = <String>[
       '광고/홍보성 내용',
       '욕설/비방',
@@ -358,7 +345,6 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
 
   void _showSnack(String message) {
     if (!mounted) return;
-
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
@@ -387,17 +373,15 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
 
       final replies = c.repliesOf(_rootCommentId);
       final hasTarget =
-          _focusCommentId != null && replies.any((e) => e.id == _focusCommentId);
+          _focusCommentId != null &&
+          replies.any((e) => e.id == _focusCommentId);
 
       if (hasTarget) {
-        final index = replies.indexWhere((e) => e.id == _focusCommentId) + 1;
+        final index =
+            replies.indexWhere((e) => e.id == _focusCommentId) + 1;
         final offset = index * 108.0;
-
         _scrollController.jumpTo(
-          offset.clamp(
-            0,
-            _scrollController.position.maxScrollExtent,
-          ),
+          offset.clamp(0, _scrollController.position.maxScrollExtent),
         );
         return;
       }
@@ -421,51 +405,69 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
       );
     }
 
-    return WillPopScope(
-      onWillPop: () async {
-        await _handleWillPop();
-        return true;
-      },
-      child: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: _dismissKeyboard,
-        child: Scaffold(
-          resizeToAvoidBottomInset: false,
-          appBar: AppBar(
-            title: const Text('답글'),
-            leading: IconButton(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: () async {
-                await _handleWillPop();
-                if (mounted) Get.back(result: true);
-              },
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: _dismissKeyboard,
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        appBar: AppBar(
+          title: const Text('답글'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () {
+              // _isPopping 가드: 연타해도 한 번만 pop
+              if (_isPopping) return;
+              _isPopping = true;
+              _dismissKeyboard();
+              Get.back(result: _didSubmit);
+            },
+          ),
+        ),
+        // body 안 Column으로 키보드 회피를 처리한다.
+        // bottomNavigationBar 높이가 키보드에 따라 변하면 Scaffold가
+        // body 전체를 relayout하면서 프레임 드랍이 생긴다.
+        // _KeyboardSpacer(단순 SizedBox)만 viewInsets를 읽어
+        // Material/Shadow 재페인트 없이 위치만 조정한다.
+        // SafeArea 래퍼는 제거: top은 AppBar가 처리, bottom은 _BottomReplyBar 내부가 처리.
+        // SafeArea(bottom: false)도 MediaQuery.of() 전체를 구독해 불필요한 리빌드를 유발한다.
+        body: Column(
+          children: [
+            Expanded(
+              child: _ThreadBodyList(
+                controller: c,
+                scrollController: _scrollController,
+                rootCommentId: _rootCommentId,
+                focusCommentId: _focusCommentId,
+                timeLabel: _timeLabel,
+                onEdit: _startEdit,
+                onDelete: _delete,
+                onReport: _report,
+              ),
             ),
-          ),
-          body: SafeArea(
-            top: false,
-            bottom: false,
-            child: _ThreadBodyList(
-              controller: c,
-              scrollController: _scrollController,
-              rootCommentId: _rootCommentId,
-              focusCommentId: _focusCommentId,
-              timeLabel: _timeLabel,
-              onEdit: _startEdit,
-              onDelete: _delete,
-              onReport: _report,
+            _BottomReplyBar(
+              controller: _inputCtrl,
+              focusNode: _focusNode,
+              isSubmitting: _isSubmittingLocal,
+              isEditing: _editingCommentId != null,
+              onCancelEdit: _cancelEdit,
+              onSubmit: _submit,
             ),
-          ),
-          bottomNavigationBar: _BottomReplyBar(
-            controller: _inputCtrl,
-            focusNode: _focusNode,
-            isSubmitting: _isSubmittingLocal,
-            isEditing: _editingCommentId != null,
-            onCancelEdit: _cancelEdit,
-            onSubmit: _submit,
-          ),
+            const _KeyboardSpacer(),
+          ],
         ),
       ),
     );
+  }
+}
+
+// 키보드 높이만큼 공간을 차지하는 단순 위젯.
+// 이 위젯만 매 프레임 리빌드되고, _BottomReplyBar(Material+Shadow)는 건드리지 않는다.
+class _KeyboardSpacer extends StatelessWidget {
+  const _KeyboardSpacer();
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(height: MediaQuery.viewInsetsOf(context).bottom);
   }
 }
 
@@ -537,16 +539,13 @@ class _RepliesHeader extends StatelessWidget {
     return Obx(() {
       final myStore = Get.find<MyStoreController>();
       final blockedIds = myStore.blockedUsers.map((e) => e.userId).toSet();
-
       final replies = controller.repliesOf(rootCommentId);
-      final visibleReplies = replies.where((reply) {
-        return !blockedIds.contains(reply.authorId);
-      }).toList(growable: false);
+      final count = replies.where((r) => !blockedIds.contains(r.authorId)).length;
 
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 2, 16, 4),
         child: Text(
-          '답글 ${visibleReplies.length}',
+          '답글 $count',
           style: const TextStyle(
             fontSize: 12.5,
             fontWeight: FontWeight.w800,
@@ -580,22 +579,26 @@ class _RepliesList extends StatelessWidget {
     return Obx(() {
       final myStore = Get.find<MyStoreController>();
       final blockedIds = myStore.blockedUsers.map((e) => e.userId).toSet();
-
       final replies = controller.repliesOf(rootCommentId);
-      final visibleReplies = replies.where((reply) {
-        return !blockedIds.contains(reply.authorId);
-      }).toList(growable: false);
+      final visibleReplies = replies
+          .where((r) => !blockedIds.contains(r.authorId))
+          .toList(growable: false);
 
       return Column(
         children: [
           for (final reply in visibleReplies)
-            _ReplyCommentCard(
-              replyId: reply.id,
-              controller: controller,
-              timeLabel: timeLabel,
-              onEdit: onEdit,
-              onDelete: onDelete,
-              onReport: onReport,
+            // ValueKey: 새 답글 추가 시 기존 카드를 element 재사용으로 처리,
+            // RepaintBoundary: 개별 카드 내부 상태 변화가 이웃 카드에 영향 없음
+            RepaintBoundary(
+              key: ValueKey(reply.id),
+              child: _ReplyCommentCard(
+                replyId: reply.id,
+                controller: controller,
+                timeLabel: timeLabel,
+                onEdit: onEdit,
+                onDelete: onDelete,
+                onReport: onReport,
+              ),
             ),
         ],
       );
@@ -622,11 +625,11 @@ class _RootCommentCard extends StatelessWidget {
 
   Future<void> _blockUser(Comment root) async {
     final myStore = Get.find<MyStoreController>();
-
     await myStore.blockUser(
       BlockedUserItem(
         userId: root.authorId,
-        nickname: root.authorLabel.trim().isEmpty ? '익명' : root.authorLabel,
+        nickname:
+            root.authorLabel.trim().isEmpty ? '익명' : root.authorLabel,
         industry: root.industryId,
         region: root.locationLabel,
         blockedAt: DateTime.now(),
@@ -649,7 +652,8 @@ class _RootCommentCard extends StatelessWidget {
 
       final blocked = root.isDeleted || root.isReportThresholdReached;
       final isMine = root.authorId == controller.currentUserId;
-      final isLikedByMe = root.likedUserIds.contains(controller.currentUserId);
+      final isLikedByMe =
+          root.likedUserIds.contains(controller.currentUserId);
       final likeColor =
           isLikedByMe ? const Color(0xFFE5484D) : const Color(0xFF6B7280);
 
@@ -702,7 +706,9 @@ class _RootCommentCard extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          isLikedByMe ? Icons.favorite : Icons.favorite_border,
+                          isLikedByMe
+                              ? Icons.favorite
+                              : Icons.favorite_border,
                           size: 14,
                           color: likeColor,
                         ),
@@ -720,9 +726,7 @@ class _RootCommentCard extends StatelessWidget {
                   ),
                   if (isMine)
                     _InlineTextAction(
-                      onTap: () async {
-                        onEdit(root);
-                      },
+                      onTap: () async => onEdit(root),
                       child: const Text(
                         '수정',
                         style: TextStyle(
@@ -734,9 +738,7 @@ class _RootCommentCard extends StatelessWidget {
                     ),
                   if (isMine)
                     _InlineTextAction(
-                      onTap: () async {
-                        await onDelete(root);
-                      },
+                      onTap: () async => onDelete(root),
                       child: const Text(
                         '삭제',
                         style: TextStyle(
@@ -748,9 +750,7 @@ class _RootCommentCard extends StatelessWidget {
                     ),
                   if (!isMine)
                     _InlineTextAction(
-                      onTap: () async {
-                        await onReport(root);
-                      },
+                      onTap: () async => onReport(root),
                       child: const Text(
                         '신고',
                         style: TextStyle(
@@ -762,9 +762,7 @@ class _RootCommentCard extends StatelessWidget {
                     ),
                   if (!isMine)
                     _InlineTextAction(
-                      onTap: () async {
-                        await _blockUser(root);
-                      },
+                      onTap: () async => _blockUser(root),
                       child: const Text(
                         '차단',
                         style: TextStyle(
@@ -803,11 +801,11 @@ class _ReplyCommentCard extends StatelessWidget {
 
   Future<void> _blockUser(Comment reply) async {
     final myStore = Get.find<MyStoreController>();
-
     await myStore.blockUser(
       BlockedUserItem(
         userId: reply.authorId,
-        nickname: reply.authorLabel.trim().isEmpty ? '익명' : reply.authorLabel,
+        nickname:
+            reply.authorLabel.trim().isEmpty ? '익명' : reply.authorLabel,
         industry: reply.industryId,
         region: reply.locationLabel,
         blockedAt: DateTime.now(),
@@ -830,7 +828,8 @@ class _ReplyCommentCard extends StatelessWidget {
 
       final blocked = reply.isDeleted || reply.isReportThresholdReached;
       final isMine = reply.authorId == controller.currentUserId;
-      final isLikedByMe = reply.likedUserIds.contains(controller.currentUserId);
+      final isLikedByMe =
+          reply.likedUserIds.contains(controller.currentUserId);
       final likeColor =
           isLikedByMe ? const Color(0xFFE5484D) : const Color(0xFF6B7280);
 
@@ -902,7 +901,9 @@ class _ReplyCommentCard extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Icon(
-                            isLikedByMe ? Icons.favorite : Icons.favorite_border,
+                            isLikedByMe
+                                ? Icons.favorite
+                                : Icons.favorite_border,
                             size: 14,
                             color: likeColor,
                           ),
@@ -920,9 +921,7 @@ class _ReplyCommentCard extends StatelessWidget {
                     ),
                     if (isMine)
                       _InlineTextAction(
-                        onTap: () async {
-                          onEdit(reply);
-                        },
+                        onTap: () async => onEdit(reply),
                         child: const Text(
                           '수정',
                           style: TextStyle(
@@ -934,9 +933,7 @@ class _ReplyCommentCard extends StatelessWidget {
                       ),
                     if (isMine)
                       _InlineTextAction(
-                        onTap: () async {
-                          await onDelete(reply);
-                        },
+                        onTap: () async => onDelete(reply),
                         child: const Text(
                           '삭제',
                           style: TextStyle(
@@ -948,9 +945,7 @@ class _ReplyCommentCard extends StatelessWidget {
                       ),
                     if (!isMine)
                       _InlineTextAction(
-                        onTap: () async {
-                          await onReport(reply);
-                        },
+                        onTap: () async => onReport(reply),
                         child: const Text(
                           '신고',
                           style: TextStyle(
@@ -962,9 +957,7 @@ class _ReplyCommentCard extends StatelessWidget {
                       ),
                     if (!isMine)
                       _InlineTextAction(
-                        onTap: () async {
-                          await _blockUser(reply);
-                        },
+                        onTap: () async => _blockUser(reply),
                         child: const Text(
                           '차단',
                           style: TextStyle(
@@ -1004,136 +997,129 @@ class _BottomReplyBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final keyboardBottom = MediaQuery.of(context).viewInsets.bottom;
-
-    return Padding(
-      padding: EdgeInsets.only(bottom: keyboardBottom),
-      child: RepaintBoundary(
-        child: Material(
-          color: Colors.white,
-          elevation: 8,
-          child: SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isEditing)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Row(
-                        children: [
-                          const Expanded(
-                            child: Text(
-                              '댓글 수정 중',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF6B7280),
-                              ),
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: onCancelEdit,
-                            style: TextButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 4,
-                              ),
-                              minimumSize: Size.zero,
-                              tapTargetSize:
-                                  MaterialTapTargetSize.shrinkWrap,
-                            ),
-                            child: const Text(
-                              '취소',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF6B7280),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Expanded(
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(minHeight: 38),
-                          child: TextField(
-                            controller: controller,
-                            focusNode: focusNode,
-                            minLines: 1,
-                            maxLines: 3,
-                            textInputAction: TextInputAction.send,
-                            onSubmitted: (_) => onSubmit(),
-                            decoration: InputDecoration(
-                              hintText:
-                                  isEditing ? '댓글을 수정하세요.' : '답글을 입력하세요.',
-                              hintStyle: const TextStyle(
-                                color: Color(0xFF9CA3AF),
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
-                              ),
-                              isDense: true,
-                              border: InputBorder.none,
-                              enabledBorder: InputBorder.none,
-                              focusedBorder: InputBorder.none,
-                              disabledBorder: InputBorder.none,
-                              errorBorder: InputBorder.none,
-                              focusedErrorBorder: InputBorder.none,
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 0,
-                                vertical: 8,
-                              ),
-                            ),
-                            style: const TextStyle(
-                              color: Color(0xFF111111),
-                              fontSize: 14,
-                              height: 1.35,
-                              fontWeight: FontWeight.w500,
+    // viewPaddingOf: 물리적 홈 인디케이터 높이(34px 등)만 읽는다.
+    // viewInsets(키보드)와 무관하므로 키보드 애니메이션 중 이 위젯은 절대 리빌드되지 않는다.
+    // 키보드 공간은 부모 Column의 _KeyboardSpacer가 전담한다.
+    final safeBottom = MediaQuery.viewPaddingOf(context).bottom;
+    return RepaintBoundary(
+      child: Material(
+        color: Colors.white,
+        elevation: 8,
+        child: Padding(
+            padding: EdgeInsets.fromLTRB(14, 8, 14, 8 + safeBottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isEditing)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            '댓글 수정 중',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF6B7280),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Obx(() {
-                        final enabled = !isSubmitting.value;
-
-                        return TextButton(
-                          onPressed: enabled ? onSubmit : null,
+                        TextButton(
+                          onPressed: onCancelEdit,
                           style: TextButton.styleFrom(
                             padding: const EdgeInsets.symmetric(
                               horizontal: 6,
-                              vertical: 8,
+                              vertical: 4,
                             ),
                             minimumSize: Size.zero,
-                            tapTargetSize:
-                                MaterialTapTargetSize.shrinkWrap,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
-                          child: Text(
-                            isEditing ? '수정' : '등록',
+                          child: const Text(
+                            '취소',
                             style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w800,
-                              color: enabled
-                                  ? const Color(0xFF875646)
-                                  : const Color(0xFFB6A79F),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF6B7280),
                             ),
                           ),
-                        );
-                      }),
-                    ],
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: 38),
+                        child: TextField(
+                          controller: controller,
+                          focusNode: focusNode,
+                          minLines: 1,
+                          maxLines: 3,
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: (_) => onSubmit(),
+                          decoration: InputDecoration(
+                            hintText:
+                                isEditing ? '댓글을 수정하세요.' : '답글을 입력하세요.',
+                            hintStyle: const TextStyle(
+                              color: Color(0xFF9CA3AF),
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            isDense: true,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            disabledBorder: InputBorder.none,
+                            errorBorder: InputBorder.none,
+                            focusedErrorBorder: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 0,
+                              vertical: 8,
+                            ),
+                          ),
+                          style: const TextStyle(
+                            color: Color(0xFF111111),
+                            fontSize: 14,
+                            height: 1.35,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Obx(() {
+                      final enabled = !isSubmitting.value;
+                      return TextButton(
+                        onPressed: enabled ? onSubmit : null,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 8,
+                          ),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: Text(
+                          isEditing ? '수정' : '등록',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w800,
+                            color: enabled
+                                ? const Color(0xFF875646)
+                                : const Color(0xFFB6A79F),
+                          ),
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+              ],
             ),
           ),
         ),
-      ),
     );
   }
 }

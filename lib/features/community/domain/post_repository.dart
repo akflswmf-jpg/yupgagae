@@ -106,6 +106,13 @@ abstract class PostRepository {
     required String reason,
   });
 
+  Future<Comment> updateComment({
+    required String postId,
+    required String commentId,
+    required String userId,
+    required String text,
+  });
+
   Future<List<Post>> fetchMyPosts(String userId);
 
   Future<List<Comment>> fetchMyComments(String userId);

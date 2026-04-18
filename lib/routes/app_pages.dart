@@ -3,8 +3,7 @@ import 'package:get/get.dart';
 
 import 'app_routes.dart';
 
-// 스플래시
-import 'package:yupgagae/features/splash/view/splash_screen.dart';
+// ❌ 스플래시 제거
 
 // 루트
 import 'package:yupgagae/root_shell.dart';
@@ -25,19 +24,12 @@ import 'package:yupgagae/features/community/bindings/write_post_binding.dart';
 import 'package:yupgagae/features/community/view/post_detail_screen.dart';
 import 'package:yupgagae/features/community/bindings/post_detail_binding.dart';
 
-// 댓글 작성
-import 'package:yupgagae/features/community/view/comment_write_screen.dart';
-
 // 답글 스레드
 import 'package:yupgagae/features/community/view/community_thread_screen.dart';
 import 'package:yupgagae/features/community/bindings/comment_thread_binding.dart';
 
 class AppPages {
   static final pages = <GetPage>[
-    GetPage(
-      name: AppRoutes.splash,
-      page: () => const SplashScreen(),
-    ),
     GetPage(
       name: AppRoutes.root,
       page: () => const RootShell(),
@@ -74,10 +66,6 @@ class AppPages {
         return PostDetailScreen(postId: postId);
       },
       binding: PostDetailBinding(),
-    ),
-    GetPage(
-      name: AppRoutes.commentWrite,
-      page: () => const CommentWriteScreen(),
     ),
     GetPage(
       name: AppRoutes.commentThread,

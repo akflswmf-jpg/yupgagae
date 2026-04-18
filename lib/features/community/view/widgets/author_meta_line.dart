@@ -138,6 +138,7 @@ class _MetaFlow extends StatelessWidget {
       children: [
         if (hasIndustry)
           Flexible(
+            flex: 3,
             fit: FlexFit.loose,
             child: Text(
               industryName,
