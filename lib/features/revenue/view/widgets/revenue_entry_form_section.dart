@@ -20,6 +20,8 @@ class RevenueEntryFormSection extends StatelessWidget {
   final Color strongAccentColor;
   final Color borderColor;
   final Color surfaceColor;
+  final bool isEditable;
+  final String? deadlineMessage;
 
   const RevenueEntryFormSection({
     super.key,
@@ -40,10 +42,16 @@ class RevenueEntryFormSection extends StatelessWidget {
     required this.strongAccentColor,
     required this.borderColor,
     required this.surfaceColor,
+    this.isEditable = true,
+    this.deadlineMessage,
   });
 
   @override
   Widget build(BuildContext context) {
+    final bool amountEnabled = isEditable;
+    final bool dailyToggleEnabled = isEditable;
+    final bool actionEnabled = isEditable && !isSaving;
+
     return RepaintBoundary(
       child: Container(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
@@ -73,6 +81,27 @@ class RevenueEntryFormSection extends StatelessWidget {
               borderColor: borderColor,
               surfaceColor: surfaceColor,
             ),
+            if (deadlineMessage != null && deadlineMessage!.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAF9),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFE4E7EC)),
+                ),
+                child: Text(
+                  deadlineMessage!,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: isEditable ? kRevenueTextSub : kRevenueDanger,
+                    fontWeight: FontWeight.w700,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             ValueListenableBuilder<bool>(
               valueListenable: isClosedNotifier,
@@ -80,10 +109,11 @@ class RevenueEntryFormSection extends StatelessWidget {
                 return RepaintBoundary(
                   child: _RevenueAmountField(
                     controller: amountController,
-                    enabled: isMonthlyTotalMode ? true : !isClosed,
+                    enabled: amountEnabled &&
+                        (isMonthlyTotalMode ? true : !isClosed),
                     labelText: isDailyMode ? '일 매출 입력' : '월 매출 입력',
                     hintText: isDailyMode ? '예: 180000' : '예: 5400000',
-                    onSubmitted: (_) => onSubmit(),
+                    onSubmitted: actionEnabled ? (_) => onSubmit() : null,
                     accentColor: accentColor,
                     borderColor: borderColor,
                   ),
@@ -98,7 +128,9 @@ class RevenueEntryFormSection extends StatelessWidget {
                   return RepaintBoundary(
                     child: _ClosedToggleTile(
                       isClosed: isClosed,
+                      enabled: dailyToggleEnabled,
                       onTap: () {
+                        if (!dailyToggleEnabled) return;
                         final next = !isClosed;
                         isClosedNotifier.value = next;
                         if (next) {
@@ -117,6 +149,7 @@ class RevenueEntryFormSection extends StatelessWidget {
               child: _ActionButtons(
                 hasExisting: hasExisting,
                 isSaving: isSaving,
+                isEditable: isEditable,
                 onDelete: onDelete,
                 onSubmit: onSubmit,
                 strongAccentColor: strongAccentColor,
@@ -274,12 +307,14 @@ class _RevenueAmountField extends StatelessWidget {
 
 class _ClosedToggleTile extends StatelessWidget {
   final bool isClosed;
+  final bool enabled;
   final VoidCallback onTap;
   final Color accentColor;
   final Color borderColor;
 
   const _ClosedToggleTile({
     required this.isClosed,
+    required this.enabled,
     required this.onTap,
     required this.accentColor,
     required this.borderColor,
@@ -289,49 +324,52 @@ class _ClosedToggleTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkWell(
       borderRadius: BorderRadius.circular(16),
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: BoxDecoration(
-          color: isClosed ? kRevenuePrimarySoft : Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: isClosed ? accentColor : borderColor,
+      onTap: enabled ? onTap : null,
+      child: Opacity(
+        opacity: enabled ? 1 : 0.6,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          decoration: BoxDecoration(
+            color: isClosed ? kRevenuePrimarySoft : Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isClosed ? accentColor : borderColor,
+            ),
           ),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(6),
-                color: isClosed ? accentColor : Colors.white,
-                border: Border.all(
-                  color: isClosed ? accentColor : const Color(0xFFD0D5DD),
+          child: Row(
+            children: [
+              Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(6),
+                  color: isClosed ? accentColor : Colors.white,
+                  border: Border.all(
+                    color: isClosed ? accentColor : const Color(0xFFD0D5DD),
+                  ),
+                ),
+                child: isClosed
+                    ? const Icon(
+                        Icons.check,
+                        size: 14,
+                        color: Colors.white,
+                      )
+                    : null,
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  '휴무',
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w800,
+                    color: kRevenueTextMain,
+                  ),
                 ),
               ),
-              child: isClosed
-                  ? const Icon(
-                      Icons.check,
-                      size: 14,
-                      color: Colors.white,
-                    )
-                  : null,
-            ),
-            const SizedBox(width: 12),
-            const Expanded(
-              child: Text(
-                '휴무',
-                style: TextStyle(
-                  fontSize: 14.5,
-                  fontWeight: FontWeight.w800,
-                  color: kRevenueTextMain,
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -341,6 +379,7 @@ class _ClosedToggleTile extends StatelessWidget {
 class _ActionButtons extends StatelessWidget {
   final bool hasExisting;
   final bool isSaving;
+  final bool isEditable;
   final Future<void> Function() onDelete;
   final Future<void> Function() onSubmit;
   final Color strongAccentColor;
@@ -348,6 +387,7 @@ class _ActionButtons extends StatelessWidget {
   const _ActionButtons({
     required this.hasExisting,
     required this.isSaving,
+    required this.isEditable,
     required this.onDelete,
     required this.onSubmit,
     required this.strongAccentColor,
@@ -355,6 +395,8 @@ class _ActionButtons extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bool canAct = isEditable && !isSaving;
+
     return Row(
       children: [
         if (hasExisting) ...[
@@ -362,7 +404,7 @@ class _ActionButtons extends StatelessWidget {
             child: SizedBox(
               height: 48,
               child: OutlinedButton(
-                onPressed: isSaving ? null : () => onDelete(),
+                onPressed: canAct ? () => onDelete() : null,
                 style: OutlinedButton.styleFrom(
                   foregroundColor: kRevenueDanger,
                   side: const BorderSide(
@@ -388,7 +430,7 @@ class _ActionButtons extends StatelessWidget {
           child: SizedBox(
             height: 48,
             child: FilledButton(
-              onPressed: isSaving ? null : () => onSubmit(),
+              onPressed: canAct ? () => onSubmit() : null,
               style: FilledButton.styleFrom(
                 backgroundColor: strongAccentColor,
                 disabledBackgroundColor: const Color(0xFFCBD5E1),

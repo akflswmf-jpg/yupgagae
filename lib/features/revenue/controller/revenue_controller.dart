@@ -65,6 +65,7 @@ class RevenueController extends GetxController {
   static const int _trimPercent = 5;
   static const int _trimMinSampleSize = 40;
   static const int dailyComparisonMinEnteredDays = 10;
+  static const int dailyEntryEditableDays = 10;
 
   final isLoading = false.obs;
   final isSaving = false.obs;
@@ -232,6 +233,11 @@ class RevenueController extends GetxController {
       1,
     );
 
+    if (!canEditDate(targetDate)) {
+      error.value = '입력 가능 기간이 지나 저장할 수 없습니다.';
+      return false;
+    }
+
     if (_hasMonthlyTotalForMonth(targetMonth)) {
       error.value = '이 달에는 이미 월별 입력 데이터가 있습니다. 먼저 월별 데이터를 삭제해주세요.';
       return false;
@@ -326,6 +332,11 @@ class RevenueController extends GetxController {
     final entry = selectedDateEntry;
     if (entry == null) return false;
 
+    if (!canEditDate(selectedDate.value)) {
+      error.value = '입력 가능 기간이 지나 삭제할 수 없습니다.';
+      return false;
+    }
+
     try {
       isSaving.value = true;
       error.value = null;
@@ -394,7 +405,9 @@ class RevenueController extends GetxController {
   void _upsertMonthlyTotalEntry(RevenueMonthlyTotalEntry entry) {
     final list = monthlyTotalEntriesRx.toList();
     final index = list.indexWhere(
-      (e) => e.month.year == entry.month.year && e.month.month == entry.month.month,
+      (e) =>
+          e.month.year == entry.month.year &&
+          e.month.month == entry.month.month,
     );
 
     if (index >= 0) {
@@ -484,6 +497,37 @@ class RevenueController extends GetxController {
 
   String get currentIndustry {
     return profile.value?.industry ?? '-';
+  }
+
+  DateTime get currentMonthStart {
+    final now = _dateOnly(DateTime.now());
+    return DateTime(now.year, now.month, 1);
+  }
+
+  DateTime get previousMonthStart {
+    final now = _dateOnly(DateTime.now());
+    return DateTime(now.year, now.month - 1, 1);
+  }
+
+  bool _isSameMonth(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month;
+  }
+
+  bool get isMonthlyComparisonTargetMonth {
+    if (!isMonthlyTotalMode) return false;
+    final selected = selectedMonthlyModeMonthStart;
+    return _isSameMonth(selected, currentMonthStart) ||
+        _isSameMonth(selected, previousMonthStart);
+  }
+
+  bool get hasMonthlyComparisonPairCompleted {
+    final currentEntry = monthlyTotalEntriesRx.any(
+      (e) => _isSameMonth(e.month, currentMonthStart),
+    );
+    final previousEntry = monthlyTotalEntriesRx.any(
+      (e) => _isSameMonth(e.month, previousMonthStart),
+    );
+    return currentEntry && previousEntry;
   }
 
   DateTime get selectedDailyMonthStart {
@@ -639,7 +683,8 @@ class RevenueController extends GetxController {
     if (isDailyMode) {
       return enteredDailyComparisonCount >= dailyComparisonMinEnteredDays;
     }
-    return selectedMonthlyTotalEntry != null;
+
+    return isMonthlyComparisonTargetMonth && hasMonthlyComparisonPairCompleted;
   }
 
   String? get comparisonLockMessage {
@@ -649,10 +694,15 @@ class RevenueController extends GetxController {
       return '10일 이상 매출 입력 후 업종·지역 매출 비교를 해보세요.';
     }
 
-    return '월별 매출을 입력하면 업종·지역 비교를 확인할 수 있어요.';
+    if (!isMonthlyComparisonTargetMonth) {
+      return '월별 비교 데이터는 당월과 전월만 반영돼요.';
+    }
+
+    return '당월과 전월 매출을 모두 입력하면 비교 기능이 활성화돼요.';
   }
 
-  int get visibleTopTotal => isDailyMode ? selectedDailyMonthTotal : selectedMonthlyModeTotal;
+  int get visibleTopTotal =>
+      isDailyMode ? selectedDailyMonthTotal : selectedMonthlyModeTotal;
 
   bool get hasVisibleRevenueForComparison {
     if (!comparisonUnlocked) return false;
@@ -711,6 +761,11 @@ class RevenueController extends GetxController {
 
   int? get visibleTopPercent {
     if (!comparisonUnlocked) return null;
+    final percentile = refinedPercentile;
+    if (percentile != null) {
+      return percentile;
+    }
+
     final avg = visibleIndustryAverage;
     if (avg == null || avg <= 0 || visibleTopTotal <= 0) return null;
 
@@ -722,6 +777,74 @@ class RevenueController extends GetxController {
     if (ratio >= 0.75) return 65;
     if (ratio >= 0.6) return 80;
     return 90;
+  }
+
+  bool get isOutlierUser {
+    if (!comparisonUnlocked) return false;
+
+    final values = _getIndustryValues();
+    if (values.length < _trimMinSampleSize) return false;
+    if (visibleTopTotal <= 0) return false;
+
+    final sorted = [...values]..sort();
+    final trimCount = max(1, (sorted.length * _trimPercent / 100).floor());
+
+    if (sorted.length <= trimCount * 2) return false;
+
+    final lowerBound = sorted[trimCount];
+    final upperBound = sorted[sorted.length - trimCount - 1];
+
+    return visibleTopTotal < lowerBound || visibleTopTotal > upperBound;
+  }
+
+  bool get isTopOutlier {
+    if (!comparisonUnlocked) return false;
+
+    final values = _getIndustryValues();
+    if (values.length < _trimMinSampleSize) return false;
+    if (visibleTopTotal <= 0) return false;
+
+    final sorted = [...values]..sort();
+    final trimCount = max(1, (sorted.length * _trimPercent / 100).floor());
+
+    if (sorted.length <= trimCount * 2) return false;
+
+    final upperBound = sorted[sorted.length - trimCount - 1];
+    return visibleTopTotal > upperBound;
+  }
+
+  bool get isBottomOutlier {
+    if (!comparisonUnlocked) return false;
+
+    final values = _getIndustryValues();
+    if (values.length < _trimMinSampleSize) return false;
+    if (visibleTopTotal <= 0) return false;
+
+    final sorted = [...values]..sort();
+    final trimCount = max(1, (sorted.length * _trimPercent / 100).floor());
+
+    if (sorted.length <= trimCount * 2) return false;
+
+    final lowerBound = sorted[trimCount];
+    return visibleTopTotal < lowerBound;
+  }
+
+  String? get outlierGuideMessage {
+    if (!comparisonUnlocked) return null;
+    if (!isOutlierUser) return null;
+
+    final percent = visibleTopPercent;
+    if (percent == null) return null;
+
+    if (isTopOutlier) {
+      return '사장님 매출은 상위 $percent%에 해당해 평균에서 제외됩니다.';
+    }
+
+    if (isBottomOutlier) {
+      return '사장님 매출은 하위 $percent% 구간에 해당해 평균에서 제외됩니다.';
+    }
+
+    return null;
   }
 
   int get previousMonthlyModeTotal {
@@ -741,7 +864,10 @@ class RevenueController extends GetxController {
     return ((selectedMonthlyModeTotal - prev) / prev) * 100;
   }
 
-  List<RevenueWeeklyTrendPoint> get recent4WeekTrend => _recent4WeekTrendCache;
+  List<RevenueWeeklyTrendPoint> get recent4WeekTrend {
+    _ensureRecent4WeekTrendCache();
+    return _recent4WeekTrendCache;
+  }
 
   List<RevenueWeekdayPatternPoint> get selectedDailyWeekdayPattern {
     _ensureWeekdayPatternCache();
@@ -761,6 +887,41 @@ class RevenueController extends GetxController {
   int get selectedDailyWeekdayPatternTopAverage {
     _ensureWeekdayPatternCache();
     return _weekdayPatternCacheTopAverage;
+  }
+
+  bool get selectedDateEditable => canEditDate(selectedDate.value);
+
+  String get editDeadlineMessage {
+    final target = _dateOnly(selectedDate.value);
+    final deadline = target.add(
+      const Duration(days: dailyEntryEditableDays),
+    );
+    final now = _dateOnly(DateTime.now());
+
+    if (target.isAfter(now)) {
+      final deadlineLabel =
+          '${deadline.year}.${deadline.month.toString().padLeft(2, '0')}.${deadline.day.toString().padLeft(2, '0')}';
+      return '선택한 날짜부터 $deadlineLabel까지 입력할 수 있어요.';
+    }
+
+    if (now.isAfter(deadline)) {
+      return '입력 가능 기간이 지났어요.';
+    }
+
+    final targetLabel =
+        '${target.year}.${target.month.toString().padLeft(2, '0')}.${target.day.toString().padLeft(2, '0')}';
+    final deadlineLabel =
+        '${deadline.year}.${deadline.month.toString().padLeft(2, '0')}.${deadline.day.toString().padLeft(2, '0')}';
+
+    return '$targetLabel 매출은 $deadlineLabel까지 입력할 수 있어요';
+  }
+
+  bool canEditDate(DateTime targetDate) {
+    final now = _dateOnly(DateTime.now());
+    final target = _dateOnly(targetDate);
+    final diff = now.difference(target).inDays;
+
+    return diff >= 0 && diff <= dailyEntryEditableDays;
   }
 
   void _ensureWeekdayPatternCache() {
@@ -819,6 +980,88 @@ class RevenueController extends GetxController {
     _weekdayPatternCacheAxisMax = maxAverage <= 0 ? 0 : maxAverage;
   }
 
+  void _ensureRecent4WeekTrendCache() {
+    final today = _dateOnly(DateTime.now());
+    final currentWeekStart = _startOfWeek(today);
+    final industry = currentIndustry;
+
+    final shouldReuse =
+        _recent4WeekTrendCacheWeekStart != null &&
+        _isSameDate(_recent4WeekTrendCacheWeekStart!, currentWeekStart) &&
+        _recent4WeekTrendCacheIndustry == industry &&
+        _recent4WeekTrendDailyVersion == _dailyEntriesVersion &&
+        _recent4WeekTrendMarketVersion == _marketRecordsVersion &&
+        _recent4WeekTrendProfileVersion == _profileVersion;
+
+    if (shouldReuse) return;
+
+    final points = <RevenueWeeklyTrendPoint>[];
+
+    for (int i = 3; i >= 0; i--) {
+      final weekStart = currentWeekStart.subtract(Duration(days: i * 7));
+      final weekEnd = weekStart.add(const Duration(days: 6));
+
+      final myTotal = dailyEntriesRx
+          .where((entry) =>
+              !entry.isClosed &&
+              entry.amount != null &&
+              !_dateOnly(entry.date).isBefore(weekStart) &&
+              !_dateOnly(entry.date).isAfter(weekEnd))
+          .fold<int>(0, (sum, entry) => sum + (entry.amount ?? 0));
+
+      final industryAverage = _findWeeklyIndustryAverage(
+        industry: industry,
+        weekStart: weekStart,
+        weekEnd: weekEnd,
+      );
+
+      points.add(
+        RevenueWeeklyTrendPoint(
+          label: _buildWeekLabel(weekStart, weekEnd),
+          myTotal: myTotal,
+          industryAverage: industryAverage,
+        ),
+      );
+    }
+
+    _recent4WeekTrendCacheWeekStart = currentWeekStart;
+    _recent4WeekTrendCacheIndustry = industry;
+    _recent4WeekTrendDailyVersion = _dailyEntriesVersion;
+    _recent4WeekTrendMarketVersion = _marketRecordsVersion;
+    _recent4WeekTrendProfileVersion = _profileVersion;
+    _recent4WeekTrendCache = points;
+  }
+
+  int _findWeeklyIndustryAverage({
+    required String industry,
+    required DateTime weekStart,
+    required DateTime weekEnd,
+  }) {
+    if (industry == '-') return 0;
+
+    final values = marketRecords
+        .where((record) =>
+            record.industry == industry &&
+            !_dateOnly(record.date).isBefore(weekStart) &&
+            !_dateOnly(record.date).isAfter(weekEnd) &&
+            record.amount > 0)
+        .map((record) => record.amount)
+        .toList();
+
+    return _trimmedAverage(values) ?? 0;
+  }
+
+  String _buildWeekLabel(DateTime start, DateTime end) {
+    final startLabel = '${start.month}.${start.day}';
+    final endLabel = '${end.month}.${end.day}';
+    return '$startLabel|$endLabel';
+  }
+
+  DateTime _startOfWeek(DateTime date) {
+    final normalized = _dateOnly(date);
+    return normalized.subtract(Duration(days: normalized.weekday - 1));
+  }
+
   int? _findAverageByIndustry() {
     final industry = currentIndustry;
     if (industry == '-') return null;
@@ -860,6 +1103,32 @@ class RevenueController extends GetxController {
 
     final sum = trimmed.fold<int>(0, (a, b) => a + b);
     return (sum / trimmed.length).round();
+  }
+
+  int? get refinedPercentile {
+    if (!comparisonUnlocked) return null;
+
+    final values = _getIndustryValues();
+    if (values.isEmpty) return null;
+    if (visibleTopTotal <= 0) return null;
+
+    final sorted = [...values]..sort();
+    final lessThanCount = sorted.where((e) => e < visibleTopTotal).length;
+    final greaterThanOrEqualCount = sorted.length - lessThanCount;
+    final topPercent = (greaterThanOrEqualCount / sorted.length) * 100;
+
+    return topPercent.round().clamp(1, 99);
+  }
+
+  List<int> _getIndustryValues() {
+    final industry = currentIndustry;
+    if (industry == '-') return const <int>[];
+
+    return marketRecords
+        .where((e) => e.industry == industry)
+        .map((e) => e.amount)
+        .where((e) => e > 0)
+        .toList();
   }
 
   DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);

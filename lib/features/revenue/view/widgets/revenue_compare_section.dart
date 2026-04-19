@@ -47,6 +47,13 @@ const TextStyle _kMiniBarLabelStyle = TextStyle(
   color: kRevenueTextSub,
 );
 
+const TextStyle _kOutlierGuideStyle = TextStyle(
+  fontSize: 11.6,
+  height: 1.35,
+  color: kRevenueTextSub,
+  fontWeight: FontWeight.w700,
+);
+
 class RevenueCompareSection extends StatelessWidget {
   final bool hasRevenueData;
   final bool hasComparisonData;
@@ -66,6 +73,9 @@ class RevenueCompareSection extends StatelessWidget {
   final Color accentSoftColor;
   final Color borderColor;
   final String? lockMessage;
+
+  final bool isOutlierUser;
+  final String? outlierGuideMessage;
 
   const RevenueCompareSection({
     super.key,
@@ -87,7 +97,15 @@ class RevenueCompareSection extends StatelessWidget {
     required this.accentSoftColor,
     required this.borderColor,
     this.lockMessage,
+    this.isOutlierUser = false,
+    this.outlierGuideMessage,
   });
+
+  String? _buildGuideMessage() {
+    final raw = outlierGuideMessage?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    return raw.replaceFirst('본인 매출은', '사장님 매출은');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -111,6 +129,8 @@ class RevenueCompareSection extends StatelessWidget {
     final trackMarkerRatio = topPercent == null
         ? 0.5
         : ((100 - topPercent!).clamp(0, 100)) / 100.0;
+
+    final guideMessage = _buildGuideMessage();
 
     final industryUi = _CompareMiniUiItem.fromValues(
       title: '내 업종 평균',
@@ -187,6 +207,15 @@ class RevenueCompareSection extends StatelessWidget {
                     accentColor: accentColor,
                     trackColor: accentSoftColor,
                   ),
+                  if (guideMessage != null && guideMessage.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      guideMessage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: _kOutlierGuideStyle,
+                    ),
+                  ],
                   if (!hasComparisonData) ...[
                     const SizedBox(height: 10),
                     const Text(

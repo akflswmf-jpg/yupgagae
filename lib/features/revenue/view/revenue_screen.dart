@@ -227,38 +227,9 @@ class _RevenueBody extends StatelessWidget {
   Widget build(BuildContext context) {
     return CustomScrollView(
       slivers: [
-        const SliverToBoxAdapter(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(16, 18, 16, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '매출',
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w900,
-                    color: kRevenueTextMain,
-                    letterSpacing: -0.4,
-                  ),
-                ),
-                SizedBox(height: 6),
-                Text(
-                  '입력한 매출을 기준으로 흐름과 비교 데이터를 확인해보세요.',
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    color: kRevenueTextSub,
-                    fontWeight: FontWeight.w600,
-                    height: 1.45,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
         SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
             child: Obx(
               () => RevenueModeSegment(
                 selectedMode: controller.selectedInputMode.value,
@@ -395,6 +366,8 @@ class _RevenueBody extends StatelessWidget {
                 strongAccentColor: kRevenuePrimaryDark,
                 borderColor: kRevenueBorder,
                 surfaceColor: kRevenueSurfaceSoft,
+                isEditable: controller.selectedDateEditable,
+                deadlineMessage: controller.editDeadlineMessage,
               ),
             );
           }),
@@ -439,6 +412,8 @@ class _RevenueBody extends StatelessWidget {
                 accentSoftColor: kRevenuePrimarySoft,
                 borderColor: kRevenueBorder,
                 lockMessage: buildCompareLockMessage(),
+                isOutlierUser: controller.isOutlierUser,
+                outlierGuideMessage: controller.outlierGuideMessage,
               ),
             );
           }),
@@ -465,7 +440,7 @@ class _RevenueBody extends StatelessWidget {
         ),
         SliverToBoxAdapter(
           child: Obx(() {
-            if (controller.isLoading.value) {
+            if (controller.isLoading.value || !controller.isDailyMode) {
               return const SizedBox.shrink();
             }
 
