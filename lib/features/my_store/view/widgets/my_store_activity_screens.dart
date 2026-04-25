@@ -30,6 +30,8 @@ class MyPostsScreen extends StatelessWidget {
         return '자유게시판';
       case BoardType.owner:
         return '사장님게시판';
+      case BoardType.used:
+        return '거래게시판';
     }
   }
 
@@ -148,8 +150,10 @@ class MyPostsScreen extends StatelessWidget {
                                 borderRadius: BorderRadius.circular(999),
                               ),
                               child: Text(
-                                IndustryCatalog.nameOf(post.industryId,
-                                    fallback: ''),
+                                IndustryCatalog.nameOf(
+                                  post.industryId,
+                                  fallback: '',
+                                ),
                                 style: const TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w700,

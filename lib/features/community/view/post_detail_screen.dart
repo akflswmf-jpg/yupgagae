@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 
 import 'package:yupgagae/features/community/controller/comment_controller.dart';
@@ -98,7 +99,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     try {
       await commentC.initialize(_postId);
     } catch (_) {
-      // 댓글 초기화 실패가 본문 진입을 막으면 안 된다.
     } finally {
       if (!mounted) return;
       _commentBootDone = true;
@@ -135,13 +135,11 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
   Future<void> _settleKeyboard() async {
     _dismissKeyboard();
-    await Future.delayed(const Duration(milliseconds: 240));
+    await Future.delayed(const Duration(milliseconds: 180));
   }
 
-  Future<void> _settleKeyboardForSubmit() async {
+  void _dismissKeyboardForSubmit() {
     _dismissKeyboard();
-    await WidgetsBinding.instance.endOfFrame;
-    await Future.delayed(const Duration(milliseconds: 180));
   }
 
   void _scrollToBottom({bool animated = false}) {
@@ -159,6 +157,14 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     _scrollController.jumpTo(target);
   }
 
+  Future<void> _scrollToBottomAfterCommentInsert() async {
+    for (var i = 0; i < 4; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      _scrollToBottom(animated: false);
+    }
+  }
+
   Future<void> _submitComment() async {
     final text = _commentCtrl.text.trim();
     if (text.isEmpty) return;
@@ -167,24 +173,22 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     if (!_commentBootDone) return;
 
     _isSubmittingLocal.value = true;
+    _commentCtrl.clear();
+    _dismissKeyboardForSubmit();
 
     try {
-      // 핵심:
-      // 1) 키보드 애니메이션 먼저 끝내고
-      // 2) 그 다음 댓글 상태 변경
-      await _settleKeyboardForSubmit();
-
-      await commentC.add(text);
-      _commentCtrl.clear();
+      final localId = await commentC.add(text);
 
       c.applyUpdatedCommentCount(commentC.activeCommentCount);
 
-      if (mounted) {
+      if (!mounted) return;
+
+      if (localId != null && localId.isNotEmpty) {
+        unawaited(_scrollToBottomAfterCommentInsert());
+      } else {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          Future.delayed(const Duration(milliseconds: 70), () {
-            if (!mounted) return;
-            _scrollToBottom(animated: true);
-          });
+          if (!mounted) return;
+          _scrollToBottom(animated: false);
         });
       }
 
@@ -221,15 +225,14 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     );
 
     await _settleKeyboard();
-    await commentC.load();
-    await c.refreshPost();
 
     if (!mounted) return;
 
     if (result == true) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollToBottom(animated: false);
-      });
+      c.applyUpdatedCommentCount(commentC.activeCommentCount);
+      unawaited(c.refreshPost());
+
+      unawaited(_scrollToBottomAfterCommentInsert());
     }
   }
 
@@ -389,6 +392,34 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     }
   }
 
+  Future<void> _onToggleSold() async {
+    final post = c.post.value;
+    if (post == null) return;
+    if (post.boardType != BoardType.used) return;
+
+    final ok = await _showConfirmDialog(
+      title: post.isSold ? '거래완료 해제' : '거래완료 처리',
+      message: post.isSold
+          ? '거래완료 상태를 해제할까요?'
+          : '이 게시글을 거래완료 처리할까요?',
+      confirmText: post.isSold ? '해제' : '완료',
+    );
+    if (!ok) return;
+
+    await _settleKeyboard();
+
+    try {
+      final updated = await c.toggleSold();
+      if (!mounted) return;
+
+      _showSnack(
+        updated.isSold ? '거래완료 처리됐어요.' : '거래완료가 해제됐어요.',
+      );
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
   void _showSnack(String message) {
     if (!mounted) return;
 
@@ -490,8 +521,30 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     );
   }
 
-  List<Widget> _buildOwnerActions() {
-    return [
+  List<Widget> _buildOwnerActions(Post post) {
+    final children = <Widget>[];
+
+    if (post.boardType == BoardType.used) {
+      children.add(
+        Obx(() {
+          final toggling = c.isTogglingSold.value;
+          final sold = c.post.value?.isSold ?? post.isSold;
+
+          return IconButton(
+            tooltip: sold ? '거래완료 해제' : '거래완료 처리',
+            onPressed: toggling ? null : _onToggleSold,
+            icon: Icon(
+              sold ? Icons.check_circle : Icons.check_circle_outline,
+              color: sold
+                  ? const Color(0xFFA56E5F)
+                  : const Color(0xFF111111),
+            ),
+          );
+        }),
+      );
+    }
+
+    children.addAll([
       IconButton(
         tooltip: '수정',
         onPressed: _onEditPost,
@@ -508,7 +561,9 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
           color: Color(0xFF111111),
         ),
       ),
-    ];
+    ]);
+
+    return children;
   }
 
   List<Widget> _buildGuestActions() {
@@ -550,7 +605,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
           return Row(
             mainAxisSize: MainAxisSize.min,
-            children: c.isOwner ? _buildOwnerActions() : _buildGuestActions(),
+            children: c.isOwner ? _buildOwnerActions(post) : _buildGuestActions(),
           );
         }),
       ],
@@ -582,51 +637,86 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
         body: SafeArea(
           top: false,
           bottom: false,
-          child: RepaintBoundary(
-            child: Stack(
-              children: [
-                PostDetailBody(
-                  c: c,
-                  commentC: commentC,
-                  scrollController: _scrollController,
-                  timeLabel: _timeLabel,
-                  onCommentTap: () {
-                    if (!_commentBootDone) return;
-                    _commentFocusNode.requestFocus();
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      _scrollToBottom(animated: true);
-                    });
-                  },
-                  onReplyTap: _onReplyTap,
-                  onEditTap: _onEditTap,
-                  activeReplyId: null,
-                  activeEditingId: null,
-                  onDelete: _onDelete,
-                  onReport: _onReport,
-                  onLikeTap: c.toggleLike,
-                ),
-                if (!_commentBootDone)
-                  const Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: LinearProgressIndicator(
-                      minHeight: 2,
-                      color: kCommentAccentDark,
-                      backgroundColor: Color(0xFFEDE7E3),
-                    ),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                bottom: 56,
+                child: RepaintBoundary(
+                  child: Stack(
+                    children: [
+                      PostDetailBody(
+                        c: c,
+                        commentC: commentC,
+                        scrollController: _scrollController,
+                        timeLabel: _timeLabel,
+                        onCommentTap: () {
+                          if (!_commentBootDone) return;
+                          _commentFocusNode.requestFocus();
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            _scrollToBottom(animated: false);
+                          });
+                        },
+                        onReplyTap: _onReplyTap,
+                        onEditTap: _onEditTap,
+                        activeReplyId: null,
+                        activeEditingId: null,
+                        onDelete: _onDelete,
+                        onReport: _onReport,
+                        onLikeTap: c.toggleLike,
+                      ),
+                      if (!_commentBootDone)
+                        const Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: LinearProgressIndicator(
+                            minHeight: 2,
+                            color: kCommentAccentDark,
+                            backgroundColor: Color(0xFFEDE7E3),
+                          ),
+                        ),
+                    ],
                   ),
-              ],
-            ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _KeyboardInsetFollower(
+                  child: _BottomCommentBar(
+                    controller: _commentCtrl,
+                    focusNode: _commentFocusNode,
+                    isSubmitting: _isSubmittingLocal,
+                    isCommentReady: _commentBootDone,
+                    onSubmit: _submitComment,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
-        bottomNavigationBar: _BottomCommentBar(
-          controller: _commentCtrl,
-          focusNode: _commentFocusNode,
-          isSubmitting: _isSubmittingLocal,
-          isCommentReady: _commentBootDone,
-          onSubmit: _submitComment,
-        ),
+      ),
+    );
+  }
+}
+
+class _KeyboardInsetFollower extends StatelessWidget {
+  final Widget child;
+
+  const _KeyboardInsetFollower({
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+
+    return RepaintBoundary(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: child,
       ),
     );
   }
@@ -649,90 +739,101 @@ class _BottomCommentBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final keyboardBottom = MediaQuery.of(context).viewInsets.bottom;
-
-    return Padding(
-      padding: EdgeInsets.only(bottom: keyboardBottom),
-      child: RepaintBoundary(
-        child: Material(
-          color: Colors.white,
-          elevation: 8,
-          child: SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(minHeight: 38),
-                      child: TextField(
-                        controller: controller,
-                        focusNode: focusNode,
-                        minLines: 1,
-                        maxLines: 2,
-                        enabled: isCommentReady,
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => isCommentReady ? onSubmit() : null,
-                        decoration: InputDecoration(
-                          hintText: isCommentReady
-                              ? '댓글을 입력하세요.'
-                              : '댓글 불러오는 중...',
-                          hintStyle: const TextStyle(
-                            color: kCommentHint,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          isDense: true,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          disabledBorder: InputBorder.none,
-                          errorBorder: InputBorder.none,
-                          focusedErrorBorder: InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 0,
-                            vertical: 8,
-                          ),
+    return RepaintBoundary(
+      child: Material(
+        color: Colors.white,
+        elevation: 8,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: 38),
+                    child: TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      inputFormatters: [
+                        LengthLimitingTextInputFormatter(
+                          CommentController.maxCommentLength,
                         ),
-                        style: const TextStyle(
-                          color: kCommentText,
+                      ],
+                      maxLength: CommentController.maxCommentLength,
+                      maxLengthEnforcement: MaxLengthEnforcement.enforced,
+                      buildCounter: (
+                        context, {
+                        required currentLength,
+                        required isFocused,
+                        required maxLength,
+                      }) {
+                        return null;
+                      },
+                      minLines: 1,
+                      maxLines: 2,
+                      enabled: true,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (_) {
+                        if (!isCommentReady) return;
+                        onSubmit();
+                      },
+                      decoration: const InputDecoration(
+                        hintText: '댓글을 입력하세요.',
+                        hintStyle: TextStyle(
+                          color: kCommentHint,
                           fontSize: 14,
-                          height: 1.35,
                           fontWeight: FontWeight.w500,
                         ),
+                        isDense: true,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        errorBorder: InputBorder.none,
+                        focusedErrorBorder: InputBorder.none,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 0,
+                          vertical: 8,
+                        ),
+                      ),
+                      style: const TextStyle(
+                        color: kCommentText,
+                        fontSize: 14,
+                        height: 1.35,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Obx(() {
-                    final enabled = !isSubmitting.value && isCommentReady;
+                ),
+                const SizedBox(width: 10),
+                Obx(() {
+                  final enabled = !isSubmitting.value && isCommentReady;
 
-                    return TextButton(
-                      onPressed: enabled ? onSubmit : null,
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 8,
-                        ),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  return TextButton(
+                    onPressed: enabled ? onSubmit : null,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 8,
                       ),
-                      child: Text(
-                        '등록',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w800,
-                          color: enabled
-                              ? kCommentAccentDark
-                              : const Color(0xFFB6A79F),
-                        ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(
+                      '등록',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: enabled
+                            ? kCommentAccentDark
+                            : const Color(0xFFB6A79F),
                       ),
-                    );
-                  }),
-                ],
-              ),
+                    ),
+                  );
+                }),
+              ],
             ),
           ),
         ),

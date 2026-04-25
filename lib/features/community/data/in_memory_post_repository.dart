@@ -25,8 +25,13 @@ class InMemoryPostRepository implements PostRepository {
   bool _isLoaded = false;
   Future<void>? _loadFuture;
 
-  Future<void> ensureReady() async {
+  @override
+  Future<void> warmUp() async {
     await _ensureLoaded();
+  }
+
+  Future<void> ensureReady() async {
+    await warmUp();
   }
 
   String _id() =>
@@ -110,6 +115,14 @@ class InMemoryPostRepository implements PostRepository {
     return source.where((p) => p.boardType == boardType).toList();
   }
 
+  List<Post> _applyUsedTypeFilter(
+    List<Post> source, {
+    UsedPostType? usedType,
+  }) {
+    if (usedType == null) return source;
+    return source.where((p) => p.usedType == usedType).toList();
+  }
+
   bool _matchesSearch(
     Post post,
     String query,
@@ -128,13 +141,6 @@ class InMemoryPostRepository implements PostRepository {
         return body.contains(q);
       case PostSearchField.all:
         return title.contains(q) || body.contains(q);
-    }
-  }
-
-  void _replacePost(Post updated) {
-    final idx = _indexOfPost(updated.id);
-    if (idx >= 0) {
-      _posts[idx] = updated;
     }
   }
 
@@ -213,6 +219,7 @@ class InMemoryPostRepository implements PostRepository {
     int limit = 20,
     String? searchQuery,
     BoardType? boardType,
+    UsedPostType? usedType,
     String? industryId,
     String? locationLabel,
     PostSearchField searchField = PostSearchField.all,
@@ -222,6 +229,11 @@ class InMemoryPostRepository implements PostRepository {
     var sorted = _applyBoardFilter(
       List<Post>.from(_posts),
       boardType: boardType,
+    );
+
+    sorted = _applyUsedTypeFilter(
+      sorted,
+      usedType: usedType,
     );
 
     if (industryId != null && industryId.trim().isNotEmpty) {
@@ -265,6 +277,7 @@ class InMemoryPostRepository implements PostRepository {
     required String title,
     required String body,
     required BoardType boardType,
+    UsedPostType? usedType,
     String? industryId,
     String? locationLabel,
     List<String>? imagePaths,
@@ -279,6 +292,8 @@ class InMemoryPostRepository implements PostRepository {
       title: title,
       body: body,
       boardType: boardType,
+      usedType: boardType == BoardType.used ? usedType : null,
+      isSold: false,
       createdAt: DateTime.now(),
       imagePaths: imagePaths ?? const [],
       industryId: industryId,
@@ -298,6 +313,7 @@ class InMemoryPostRepository implements PostRepository {
     required String userId,
     required String title,
     required String body,
+    UsedPostType? usedType,
     List<String>? imagePaths,
   }) async {
     await _ensureLoaded();
@@ -313,6 +329,9 @@ class InMemoryPostRepository implements PostRepository {
     final updated = current.copyWith(
       title: title,
       body: body,
+      usedType: current.boardType == BoardType.used
+          ? (usedType ?? current.usedType)
+          : null,
       imagePaths: imagePaths ?? current.imagePaths,
     );
 
@@ -343,6 +362,35 @@ class InMemoryPostRepository implements PostRepository {
     final updated = p.copyWith(
       likedUserIds: liked,
       likeCount: liked.length,
+    );
+
+    _posts[idx] = updated;
+    await _saveToDisk();
+    return updated;
+  }
+
+  @override
+  Future<Post> toggleSold({
+    required String postId,
+    required String userId,
+  }) async {
+    await _ensureLoaded();
+
+    final idx = _indexOfPost(postId);
+    if (idx < 0) throw Exception('Post not found');
+
+    final current = _posts[idx];
+
+    if (current.authorId != userId) {
+      throw Exception('처리 권한이 없습니다.');
+    }
+
+    if (current.boardType != BoardType.used) {
+      throw Exception('거래 게시글만 처리할 수 있습니다.');
+    }
+
+    final updated = current.copyWith(
+      isSold: !current.isSold,
     );
 
     _posts[idx] = updated;
@@ -628,6 +676,7 @@ class InMemoryPostRepository implements PostRepository {
     await _saveToDisk();
   }
 
+  @override
   Future<Comment> updateComment({
     required String postId,
     required String commentId,

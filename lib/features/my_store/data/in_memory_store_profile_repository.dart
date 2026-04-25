@@ -20,8 +20,14 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
 
   final Map<String, StoreProfile> _profiles = {};
   bool _loaded = false;
+  Future<void>? _loadFuture;
 
   String get _me => session.anonId;
+
+  @override
+  Future<void> warmUp() async {
+    await _ensureLoaded();
+  }
 
   StoreProfile _defaultProfile(String userId) {
     final safeUserId = userId.trim();
@@ -43,35 +49,42 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
 
   Future<void> _ensureLoaded() async {
     if (_loaded) return;
+    _loadFuture ??= _loadFromPrefs();
+    await _loadFuture;
+  }
 
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_profilesKey);
+  Future<void> _loadFromPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_profilesKey);
 
-    if (raw != null && raw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) {
-          decoded.forEach((key, value) {
-            final userId = key.toString().trim();
-            if (userId.isEmpty) return;
-            if (value is! Map) return;
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map) {
+            decoded.forEach((key, value) {
+              final userId = key.toString().trim();
+              if (userId.isEmpty) return;
+              if (value is! Map) return;
 
-            _profiles[userId] = StoreProfile.fromJson(
-              Map<String, dynamic>.from(value),
-            );
-          });
+              _profiles[userId] = StoreProfile.fromJson(
+                Map<String, dynamic>.from(value),
+              );
+            });
+          }
+        } catch (_) {
+          // 저장값이 깨져 있으면 기본값으로 복구
         }
-      } catch (_) {
-        // 저장값이 깨져 있으면 기본값으로 복구
       }
-    }
 
-    if (!_profiles.containsKey(_me)) {
-      _profiles[_me] = _defaultProfile(_me);
-    }
+      if (!_profiles.containsKey(_me)) {
+        _profiles[_me] = _defaultProfile(_me);
+      }
 
-    _loaded = true;
-    await _persist();
+      await _persist();
+    } finally {
+      _loaded = true;
+    }
   }
 
   Future<void> _persist() async {

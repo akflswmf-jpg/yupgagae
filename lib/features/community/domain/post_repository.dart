@@ -6,7 +6,8 @@ enum PostSort { latest, hot, mostCommented }
 enum PostSearchField { all, title, body }
 
 abstract class PostRepository {
-  /// 홈 화면 상단 노출을 위한 게시글 통합 로드 (후보군 확보용)
+  Future<void> warmUp();
+
   Future<List<Post>> fetchHomeTopPosts({int limit = 100});
 
   Future<List<Post>> fetchPosts({
@@ -23,6 +24,7 @@ abstract class PostRepository {
     required String title,
     required String body,
     required BoardType boardType,
+    UsedPostType? usedType,
     String? industryId,
     String? locationLabel,
     List<String>? imagePaths,
@@ -33,10 +35,17 @@ abstract class PostRepository {
     required String userId,
     required String title,
     required String body,
+    UsedPostType? usedType,
     List<String>? imagePaths,
   });
 
   Future<Post> toggleLike({required String postId, required String userId});
+
+  Future<Post> toggleSold({
+    required String postId,
+    required String userId,
+  });
+
   Future<void> incrementView(String postId);
 
   Future<PostPage> fetchLatestPage({
@@ -44,6 +53,7 @@ abstract class PostRepository {
     int limit = 20,
     String? searchQuery,
     BoardType? boardType,
+    UsedPostType? usedType,
     String? industryId,
     String? locationLabel,
     PostSearchField searchField = PostSearchField.all,

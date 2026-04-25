@@ -30,8 +30,12 @@ class PostDetailComposeHost extends StatelessWidget {
     return Obx(() {
       return PostDetailComposeSection(
         safeBottom: safeBottom,
-        editingId: commentC.activeEditingId,
-        replyTo: commentC.activeReplyTo,
+
+        // 현재 댓글 입력 구조는 상세 하단 입력바 중심이라
+        // CommentController에 activeEditingId / activeReplyTo 상태를 두지 않는다.
+        editingId: null,
+        replyTo: null,
+
         onCancelComposeMode: onCancel,
         textController: textController,
         focusNode: focusNode,

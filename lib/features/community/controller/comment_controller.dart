@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:get/get.dart';
 
 import 'package:yupgagae/core/service/anon_session_service.dart';
@@ -22,6 +24,8 @@ class CommentViewItem {
 }
 
 class CommentController extends GetxController {
+  static const int maxCommentLength = 300;
+
   final PostRepository repo;
   final StoreProfileRepository storeProfileRepo;
 
@@ -40,6 +44,10 @@ class CommentController extends GetxController {
   bool _didInitialize = false;
 
   final _blockedCache = <String>{};
+  final _commentById = <String, Comment>{};
+  final _repliesByRoot = <String, List<Comment>>{};
+  final _rootIds = <String>{};
+
   _AuthorSnapshot? _cachedAuthor;
 
   AnonSessionService? get _session => Get.isRegistered<AnonSessionService>()
@@ -58,6 +66,7 @@ class CommentController extends GetxController {
     }
 
     if (_didInitialize && _postId == normalized) {
+      unawaited(_prewarmAuthorSnapshot());
       return;
     }
 
@@ -66,6 +75,14 @@ class CommentController extends GetxController {
 
     await _loadBlockedCache();
     await load();
+
+    unawaited(_prewarmAuthorSnapshot());
+  }
+
+  Future<void> _prewarmAuthorSnapshot() async {
+    try {
+      await _getAuthorSnapshot();
+    } catch (_) {}
   }
 
   Future<void> _loadBlockedCache() async {
@@ -117,46 +134,105 @@ class CommentController extends GetxController {
       _cachedAuthor = snapshot;
       return snapshot;
     } catch (_) {
-      return const _AuthorSnapshot(
+      const fallback = _AuthorSnapshot(
         authorLabel: '익명',
         industryId: null,
         locationLabel: null,
         isOwnerVerified: false,
       );
+
+      _cachedAuthor = fallback;
+      return fallback;
     }
+  }
+
+  _AuthorSnapshot _authorSnapshotForFastSubmit() {
+    final cached = _cachedAuthor;
+    if (cached != null) return cached;
+
+    unawaited(_prewarmAuthorSnapshot());
+
+    return const _AuthorSnapshot(
+      authorLabel: '익명',
+      industryId: null,
+      locationLabel: null,
+      isOwnerVerified: false,
+    );
   }
 
   void clearAuthorCache() {
     _cachedAuthor = null;
+    unawaited(_prewarmAuthorSnapshot());
   }
 
-  List<CommentViewItem> _flattenForView(List<Comment> list) {
-    final visible = list
-        .where((c) => !_blockedCache.contains(c.authorId.trim()))
-        .toList(growable: false);
+  String _normalizeInputText(String text) {
+    return text.trim();
+  }
 
-    final roots = visible
-        .where((c) => c.parentId == null || c.parentId!.trim().isEmpty)
-        .toList()
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  void _ensureValidCommentText({
+    required String text,
+    required String emptyMessage,
+  }) {
+    final normalized = _normalizeInputText(text);
 
-    final repliesByRoot = <String, List<Comment>>{};
-    for (final comment in visible) {
-      final parentId = comment.parentId?.trim();
-      if (parentId == null || parentId.isEmpty) continue;
-
-      repliesByRoot.putIfAbsent(parentId, () => <Comment>[]).add(comment);
+    if (normalized.isEmpty) {
+      throw Exception(emptyMessage);
     }
 
-    for (final entry in repliesByRoot.entries) {
+    if (normalized.length > maxCommentLength) {
+      throw Exception('댓글은 $maxCommentLength자 이내로 입력해주세요.');
+    }
+  }
+
+  bool _isVisibleComment(Comment comment) {
+    return !_blockedCache.contains(comment.authorId.trim());
+  }
+
+  bool _isLocalCommentId(String id) {
+    return id.startsWith('local_comment_') || id.startsWith('local_reply_');
+  }
+
+  String _makeLocalId(String prefix) {
+    return '${prefix}_${DateTime.now().microsecondsSinceEpoch}_$currentUserId';
+  }
+
+  void _rebuildIndexes(List<Comment> visibleSorted) {
+    _commentById
+      ..clear()
+      ..addEntries(
+        visibleSorted.map((comment) => MapEntry(comment.id, comment)),
+      );
+
+    _rootIds.clear();
+    _repliesByRoot.clear();
+
+    for (final comment in visibleSorted) {
+      final parentId = comment.parentId?.trim();
+      if (parentId == null || parentId.isEmpty) {
+        _rootIds.add(comment.id);
+        continue;
+      }
+
+      _repliesByRoot.putIfAbsent(parentId, () => <Comment>[]).add(comment);
+    }
+
+    for (final entry in _repliesByRoot.entries) {
       entry.value.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     }
+  }
 
+  List<CommentViewItem> _flattenForViewFromIndexes(List<Comment> visibleSorted) {
     final out = <CommentViewItem>[];
-    for (final root in roots) {
-      out.add(CommentViewItem(comment: root, depth: 0));
 
-      final replies = repliesByRoot[root.id] ?? const <Comment>[];
+    for (final comment in visibleSorted) {
+      final parentId = comment.parentId?.trim();
+      if (parentId != null && parentId.isNotEmpty) {
+        continue;
+      }
+
+      out.add(CommentViewItem(comment: comment, depth: 0));
+
+      final replies = _repliesByRoot[comment.id] ?? const <Comment>[];
       for (final reply in replies) {
         out.add(CommentViewItem(comment: reply, depth: 1));
       }
@@ -165,10 +241,91 @@ class CommentController extends GetxController {
     return out;
   }
 
+  void _clearCommentState() {
+    comments.clear();
+    flattenedComments.clear();
+    _commentById.clear();
+    _repliesByRoot.clear();
+    _rootIds.clear();
+  }
+
   void _applyComments(List<Comment> next) {
-    next.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    comments.assignAll(next);
-    flattenedComments.assignAll(_flattenForView(next));
+    final visibleSorted = next
+        .where(_isVisibleComment)
+        .toList(growable: false)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    _rebuildIndexes(visibleSorted);
+
+    comments.assignAll(visibleSorted);
+    flattenedComments.assignAll(_flattenForViewFromIndexes(visibleSorted));
+  }
+
+  int _flattenInsertIndexForReply(String rootCommentId) {
+    final rootIndex = flattenedComments.indexWhere(
+      (item) => item.comment.id == rootCommentId,
+    );
+
+    if (rootIndex < 0) {
+      return flattenedComments.length;
+    }
+
+    var insertIndex = rootIndex + 1;
+    while (insertIndex < flattenedComments.length) {
+      if (flattenedComments[insertIndex].depth == 0) {
+        break;
+      }
+      insertIndex++;
+    }
+
+    return insertIndex;
+  }
+
+  void _insertCommentFast(Comment comment) {
+    if (!_isVisibleComment(comment)) return;
+
+    comments.add(comment);
+    _commentById[comment.id] = comment;
+
+    final parentId = comment.parentId?.trim();
+    if (parentId == null || parentId.isEmpty) {
+      _rootIds.add(comment.id);
+      flattenedComments.add(CommentViewItem(comment: comment, depth: 0));
+      return;
+    }
+
+    final replies = _repliesByRoot.putIfAbsent(parentId, () => <Comment>[]);
+    replies.add(comment);
+    replies.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    final insertIndex = _flattenInsertIndexForReply(parentId);
+    flattenedComments.insert(
+      insertIndex,
+      CommentViewItem(comment: comment, depth: 1),
+    );
+  }
+
+  void _removeCommentById(String commentId) {
+    final id = commentId.trim();
+    if (id.isEmpty) return;
+
+    final existing = _commentById[id];
+    if (existing == null) return;
+
+    final next = comments.where((comment) => comment.id != id).toList();
+    _applyComments(next);
+  }
+
+  void _replaceLocalComment({
+    required String localId,
+    required Comment realComment,
+  }) {
+    final index = comments.indexWhere((comment) => comment.id == localId);
+    if (index < 0) return;
+
+    final next = List<Comment>.from(comments);
+    next[index] = realComment;
+    _applyComments(next);
   }
 
   void _replaceComment(Comment updated) {
@@ -188,14 +345,10 @@ class CommentController extends GetxController {
     if (targetUserId.isEmpty) return;
     if (targetUserId == currentUserId) return;
 
-    String actorLabel = '익명';
-    try {
-      final profile = await storeProfileRepo.fetchProfile();
-      final nickname = profile.nickname.trim();
-      if (nickname.isNotEmpty) {
-        actorLabel = nickname;
-      }
-    } catch (_) {}
+    String actorLabel = _cachedAuthor?.authorLabel.trim() ?? '';
+    if (actorLabel.isEmpty) {
+      actorLabel = '익명';
+    }
 
     await storeProfileRepo.addNotificationToUser(
       targetUserId,
@@ -220,14 +373,10 @@ class CommentController extends GetxController {
     if (targetUserId.isEmpty) return;
     if (targetUserId == currentUserId) return;
 
-    String actorLabel = '익명';
-    try {
-      final profile = await storeProfileRepo.fetchProfile();
-      final nickname = profile.nickname.trim();
-      if (nickname.isNotEmpty) {
-        actorLabel = nickname;
-      }
-    } catch (_) {}
+    String actorLabel = _cachedAuthor?.authorLabel.trim() ?? '';
+    if (actorLabel.isEmpty) {
+      actorLabel = '익명';
+    }
 
     await storeProfileRepo.addNotificationToUser(
       targetUserId,
@@ -258,14 +407,10 @@ class CommentController extends GetxController {
 
     if (!didLikeNow) return;
 
-    String actorLabel = '익명';
-    try {
-      final profile = await storeProfileRepo.fetchProfile();
-      final nickname = profile.nickname.trim();
-      if (nickname.isNotEmpty) {
-        actorLabel = nickname;
-      }
-    } catch (_) {}
+    String actorLabel = _cachedAuthor?.authorLabel.trim() ?? '';
+    if (actorLabel.isEmpty) {
+      actorLabel = '익명';
+    }
 
     await storeProfileRepo.addNotificationToUser(
       targetUserId,
@@ -285,8 +430,7 @@ class CommentController extends GetxController {
   Future<void> load() async {
     if (!isReady) {
       error.value = 'postId required';
-      comments.clear();
-      flattenedComments.clear();
+      _clearCommentState();
       return;
     }
 
@@ -295,37 +439,45 @@ class CommentController extends GetxController {
 
     try {
       final loaded = await repo.fetchComments(postId);
-
-      final filtered = loaded
-          .where((c) => !_blockedCache.contains(c.authorId.trim()))
-          .toList(growable: false);
-
-      _applyComments(filtered);
+      _applyComments(loaded);
     } catch (e) {
       error.value = e.toString();
-      comments.clear();
-      flattenedComments.clear();
+      _clearCommentState();
     } finally {
       isLoading.value = false;
     }
   }
 
   Comment? commentById(String commentId) {
-    try {
-      return comments.firstWhere((c) => c.id == commentId);
-    } catch (_) {
-      return null;
-    }
+    final id = commentId.trim();
+    if (id.isEmpty) return null;
+    return _commentById[id];
   }
 
   List<Comment> repliesOf(String rootCommentId) {
     final normalizedRootId = rootCommentId.trim();
-    final out = comments
-        .where((c) => (c.parentId?.trim() ?? '') == normalizedRootId)
-        .where((c) => !_blockedCache.contains(c.authorId.trim()))
-        .toList()
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    return out;
+    if (normalizedRootId.isEmpty) return const <Comment>[];
+
+    final replies = _repliesByRoot[normalizedRootId];
+    if (replies == null || replies.isEmpty) {
+      return const <Comment>[];
+    }
+
+    return List<Comment>.unmodifiable(replies);
+  }
+
+  int replyCountOf(String rootCommentId) {
+    final normalizedRootId = rootCommentId.trim();
+    if (normalizedRootId.isEmpty) return 0;
+    return _repliesByRoot[normalizedRootId]?.length ?? 0;
+  }
+
+  int replyIndexOf({
+    required String rootCommentId,
+    required String replyId,
+  }) {
+    final replies = repliesOf(rootCommentId);
+    return replies.indexWhere((comment) => comment.id == replyId);
   }
 
   String resolveReplyRootId(String commentId) {
@@ -346,25 +498,28 @@ class CommentController extends GetxController {
     return name.isEmpty ? '익명' : name;
   }
 
-  Future<void> add(String text) async {
+  Future<String?> add(String text) async {
     if (!isReady) {
       throw Exception('postId required');
     }
-    if (isSubmitting.value) return;
+    if (isSubmitting.value) return null;
 
-    final normalized = text.trim();
-    if (normalized.isEmpty) {
-      throw Exception('댓글 내용을 입력하세요.');
-    }
+    final normalized = _normalizeInputText(text);
+
+    _ensureValidCommentText(
+      text: normalized,
+      emptyMessage: '댓글 내용을 입력하세요.',
+    );
 
     isSubmitting.value = true;
     error.value = null;
 
     try {
-      final author = await _getAuthorSnapshot();
-      final Post targetPost = await repo.getPostById(postId);
+      final author = _authorSnapshotForFastSubmit();
+      final localId = _makeLocalId('local_comment');
 
-      final created = await repo.addComment(
+      final optimisticComment = Comment(
+        id: localId,
         postId: postId,
         authorId: currentUserId,
         authorLabel: author.authorLabel,
@@ -372,15 +527,21 @@ class CommentController extends GetxController {
         industryId: author.industryId,
         locationLabel: author.locationLabel,
         text: normalized,
+        parentId: null,
+        createdAt: DateTime.now(),
       );
 
-      final next = List<Comment>.from(comments)..add(created);
-      _applyComments(next);
+      _insertCommentFast(optimisticComment);
 
-      await _notifyPostAuthorForComment(
-        post: targetPost,
-        createdComment: created,
+      unawaited(
+        _commitOptimisticComment(
+          localId: localId,
+          author: author,
+          text: normalized,
+        ),
       );
+
+      return localId;
     } catch (e) {
       error.value = e.toString();
       rethrow;
@@ -389,19 +550,59 @@ class CommentController extends GetxController {
     }
   }
 
-  Future<void> reply({
+  Future<void> _commitOptimisticComment({
+    required String localId,
+    required _AuthorSnapshot author,
+    required String text,
+  }) async {
+    try {
+      final created = await repo.addComment(
+        postId: postId,
+        authorId: currentUserId,
+        authorLabel: author.authorLabel,
+        isOwnerVerified: author.isOwnerVerified,
+        industryId: author.industryId,
+        locationLabel: author.locationLabel,
+        text: text,
+      );
+
+      _replaceLocalComment(
+        localId: localId,
+        realComment: created,
+      );
+
+      unawaited(_notifyPostAuthorAfterCommentCreated(created));
+    } catch (e) {
+      error.value = e.toString();
+      _removeCommentById(localId);
+    }
+  }
+
+  Future<void> _notifyPostAuthorAfterCommentCreated(Comment created) async {
+    try {
+      final Post targetPost = await repo.getPostById(postId);
+      await _notifyPostAuthorForComment(
+        post: targetPost,
+        createdComment: created,
+      );
+    } catch (_) {}
+  }
+
+  Future<String?> reply({
     required String parentCommentId,
     required String text,
   }) async {
     if (!isReady) {
       throw Exception('postId required');
     }
-    if (isSubmitting.value) return;
+    if (isSubmitting.value) return null;
 
-    final normalizedText = text.trim();
-    if (normalizedText.isEmpty) {
-      throw Exception('답글 내용을 입력하세요.');
-    }
+    final normalizedText = _normalizeInputText(text);
+
+    _ensureValidCommentText(
+      text: normalizedText,
+      emptyMessage: '답글 내용을 입력하세요.',
+    );
 
     final normalizedParentId = parentCommentId.trim();
     if (normalizedParentId.isEmpty) {
@@ -412,33 +613,38 @@ class CommentController extends GetxController {
     error.value = null;
 
     try {
-      final author = await _getAuthorSnapshot();
+      final author = _authorSnapshotForFastSubmit();
 
       final tappedTarget = commentById(normalizedParentId);
       final rootParentId = resolveReplyRootId(normalizedParentId);
+      final localId = _makeLocalId('local_reply');
 
-      final created = await repo.addReply(
+      final optimisticReply = Comment(
+        id: localId,
         postId: postId,
-        parentCommentId: rootParentId,
         authorId: currentUserId,
         authorLabel: author.authorLabel,
         isOwnerVerified: author.isOwnerVerified,
         industryId: author.industryId,
         locationLabel: author.locationLabel,
         text: normalizedText,
+        parentId: rootParentId,
+        createdAt: DateTime.now(),
       );
 
-      final normalizedCreated = created.copyWith(parentId: rootParentId);
+      _insertCommentFast(optimisticReply);
 
-      final next = List<Comment>.from(comments)..add(normalizedCreated);
-      _applyComments(next);
+      unawaited(
+        _commitOptimisticReply(
+          localId: localId,
+          rootParentId: rootParentId,
+          tappedTarget: tappedTarget,
+          author: author,
+          text: normalizedText,
+        ),
+      );
 
-      if (tappedTarget != null) {
-        await _notifyCommentAuthorForReply(
-          targetComment: tappedTarget,
-          createdReply: normalizedCreated,
-        );
-      }
+      return localId;
     } catch (e) {
       error.value = e.toString();
       rethrow;
@@ -447,8 +653,49 @@ class CommentController extends GetxController {
     }
   }
 
+  Future<void> _commitOptimisticReply({
+    required String localId,
+    required String rootParentId,
+    required Comment? tappedTarget,
+    required _AuthorSnapshot author,
+    required String text,
+  }) async {
+    try {
+      final created = await repo.addReply(
+        postId: postId,
+        parentCommentId: rootParentId,
+        authorId: currentUserId,
+        authorLabel: author.authorLabel,
+        isOwnerVerified: author.isOwnerVerified,
+        industryId: author.industryId,
+        locationLabel: author.locationLabel,
+        text: text,
+      );
+
+      final normalizedCreated = created.copyWith(parentId: rootParentId);
+
+      _replaceLocalComment(
+        localId: localId,
+        realComment: normalizedCreated,
+      );
+
+      if (tappedTarget != null) {
+        unawaited(
+          _notifyCommentAuthorForReply(
+            targetComment: tappedTarget,
+            createdReply: normalizedCreated,
+          ),
+        );
+      }
+    } catch (e) {
+      error.value = e.toString();
+      _removeCommentById(localId);
+    }
+  }
+
   Future<void> toggleLike(String commentId) async {
     if (!isReady) return;
+    if (_isLocalCommentId(commentId)) return;
 
     final before = commentById(commentId);
     if (before == null) return;
@@ -461,16 +708,21 @@ class CommentController extends GetxController {
 
     _replaceComment(updated);
 
-    try {
-      await _notifyCommentAuthorForLike(
+    unawaited(
+      _notifyCommentAuthorForLike(
         before: before,
         after: updated,
-      );
-    } catch (_) {}
+      ),
+    );
   }
 
   Future<void> delete(String commentId) async {
     if (!isReady) return;
+
+    if (_isLocalCommentId(commentId)) {
+      _removeCommentById(commentId);
+      return;
+    }
 
     await repo.deleteComment(
       postId: postId,
@@ -489,6 +741,7 @@ class CommentController extends GetxController {
     required String reason,
   }) async {
     if (!isReady) return;
+    if (_isLocalCommentId(commentId)) return;
 
     final normalizedReason = reason.trim();
     if (normalizedReason.isEmpty) {
@@ -528,11 +781,16 @@ class CommentController extends GetxController {
     if (!isReady) {
       throw Exception('postId required');
     }
-
-    final t = text.trim();
-    if (t.isEmpty) {
-      throw Exception('내용이 비어 있습니다.');
+    if (_isLocalCommentId(commentId)) {
+      throw Exception('잠시 후 다시 시도해주세요.');
     }
+
+    final t = _normalizeInputText(text);
+
+    _ensureValidCommentText(
+      text: t,
+      emptyMessage: '내용이 비어 있습니다.',
+    );
 
     final updated = await repo.updateComment(
       postId: postId,

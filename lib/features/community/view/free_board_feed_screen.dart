@@ -16,14 +16,19 @@ const Color kCommunityAccent = Color(0xFFA56E5F);
 const Color kCommunityAccentDark = Color(0xFF875646);
 
 class FreeBoardFeedScreen extends StatefulWidget {
-  const FreeBoardFeedScreen({super.key});
+  final PostListController? controller;
+
+  const FreeBoardFeedScreen({
+    super.key,
+    this.controller,
+  });
 
   @override
   State<FreeBoardFeedScreen> createState() => _FreeBoardFeedScreenState();
 }
 
 class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
-  final PostListController c = Get.find<PostListController>();
+  late final PostListController c;
   final ScrollController _scroll = ScrollController();
 
   Timer? _initTimer;
@@ -33,8 +38,8 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
   void initState() {
     super.initState();
 
-    // 기존 microtask 즉시 실행보다 한 박자 늦춰
-    // 커뮤니티 첫 진입 프레임과 초기 로딩이 정면 충돌하지 않게 한다.
+    c = widget.controller ?? Get.find<PostListController>();
+
     if (!c.hasInitializedFeed && !_didScheduleInit) {
       _didScheduleInit = true;
       _initTimer = Timer(const Duration(milliseconds: 120), () {
@@ -242,7 +247,8 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
   }
 
   Future<void> _goWrite() async {
-    final result = await Get.toNamed('${AppRoutes.writePost}?boardType=free');
+    final boardKey = c.boardType.key;
+    final result = await Get.toNamed('${AppRoutes.writePost}?boardType=$boardKey');
     if (result == true) {
       await c.initLoad();
       if (_scroll.hasClients) {
@@ -267,15 +273,11 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
           width: 960,
         );
         await precacheImage(provider, context);
-      } catch (_) {
-        // 일부 이미지 프리캐시 실패는 무시
-      }
+      } catch (_) {}
     }
   }
 
   Future<void> _openPostDetail(Post p) async {
-    // 상세 이동을 먼저 하고, 이미지 프리캐시는 뒤로 미룬다.
-    // 기존처럼 여기서 await 걸면 첫 터치 체감이 무거워진다.
     unawaited(Future<void>(() async {
       await _precacheImages(p);
     }));
@@ -304,6 +306,17 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
     return '${diff.inDays}일 전';
   }
 
+  String _emptyMessage() {
+    switch (c.boardType) {
+      case BoardType.used:
+        return '거래 게시글이 없습니다.';
+      case BoardType.owner:
+        return '사장님 게시글이 없습니다.';
+      case BoardType.free:
+        return '게시글이 없습니다.';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -316,6 +329,34 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (c.boardType == BoardType.used) ...[
+                  Obx(() {
+                    final selected = c.selectedUsedType.value;
+
+                    return Row(
+                      children: [
+                        _UsedBoardTab(
+                          label: '전체',
+                          selected: selected == null,
+                          onTap: c.clearUsedType,
+                        ),
+                        const SizedBox(width: 8),
+                        _UsedBoardTab(
+                          label: '가게양도',
+                          selected: selected == UsedPostType.store,
+                          onTap: () => c.setUsedType(UsedPostType.store),
+                        ),
+                        const SizedBox(width: 8),
+                        _UsedBoardTab(
+                          label: '중고거래',
+                          selected: selected == UsedPostType.item,
+                          onTap: () => c.setUsedType(UsedPostType.item),
+                        ),
+                      ],
+                    );
+                  }),
+                  const SizedBox(height: 10),
+                ],
                 Row(
                   children: [
                     _ToolbarFilterButton(
@@ -331,7 +372,7 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
                     _ToolbarIconButton(
                       icon: Icons.search,
                       onTap: () => Get.toNamed(
-                        '${AppRoutes.communitySearch}?boardType=free',
+                        '${AppRoutes.communitySearch}?boardType=${c.boardType.key}',
                       ),
                     ),
                   ],
@@ -399,8 +440,8 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
 
               final list = c.visiblePosts;
               if (list.isEmpty) {
-                return const _FeedEmptyBody(
-                  message: '게시글이 없습니다.',
+                return _FeedEmptyBody(
+                  message: _emptyMessage(),
                 );
               }
 
@@ -460,6 +501,51 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
             fontSize: 13,
             fontWeight: FontWeight.w800,
             letterSpacing: -0.1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UsedBoardTab extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Future<void> Function() onTap;
+
+  const _UsedBoardTab({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Material(
+        color: selected ? kCommunityAccent : Colors.white,
+        borderRadius: BorderRadius.circular(999),
+        child: InkWell(
+          onTap: () async => onTap(),
+          borderRadius: BorderRadius.circular(999),
+          child: Container(
+            height: 36,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: selected ? kCommunityAccent : const Color(0xFFE5E7EB),
+              ),
+            ),
+            child: Center(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: selected ? Colors.white : const Color(0xFF374151),
+                ),
+              ),
+            ),
           ),
         ),
       ),

@@ -73,10 +73,8 @@ class _PostDetailContentSectionState extends State<PostDetailContentSection> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
 
-      // 핵심:
-      // 첫 프레임 직후 곧바로 디코딩을 때리지 말고,
-      // 화면이 먼저 안정화된 뒤 한 박자 늦게 프리캐시한다.
-      await Future<void>.delayed(const Duration(milliseconds: 260));
+      // 첫 프레임 안정화 후 프리캐시 시작
+      await Future<void>.delayed(const Duration(milliseconds: 220));
       if (!mounted) return;
 
       await _precachePostImages();
@@ -92,8 +90,10 @@ class _PostDetailContentSectionState extends State<PostDetailContentSection> {
 
     _lastPrecachedPaths = List<String>.from(paths);
 
-    for (final path in paths) {
-      final safePath = path.trim();
+    for (var i = 0; i < paths.length; i++) {
+      if (!mounted) return;
+
+      final safePath = paths[i].trim();
       if (safePath.isEmpty) continue;
 
       final file = File(safePath);
@@ -101,16 +101,71 @@ class _PostDetailContentSectionState extends State<PostDetailContentSection> {
 
       final provider = ResizeImage(
         FileImage(file),
-        width: 900,
+        width: 1200,
       );
 
       try {
-        // await를 걸지 않아 UI 스레드 체감 블로킹을 줄인다.
-        precacheImage(provider, context);
+        if (i == 0) {
+          // 첫 이미지는 화면 진입 체감에 영향이 커서 우선 준비
+          await precacheImage(provider, context);
+        } else {
+          // 나머지는 한 박자씩 나눠서 준비
+          await Future<void>.delayed(const Duration(milliseconds: 24));
+          await precacheImage(provider, context);
+        }
       } catch (_) {
         // 프리캐시 실패는 렌더 단계 errorBuilder에서 처리
       }
     }
+  }
+
+  String _usedPrefix() {
+    if (widget.post.boardType != BoardType.used ||
+        widget.post.usedType == null) {
+      return '';
+    }
+
+    switch (widget.post.usedType!) {
+      case UsedPostType.store:
+        return '[가게양도]';
+      case UsedPostType.item:
+        return '[중고거래]';
+    }
+  }
+
+  InlineSpan _buildStyledTitle(String baseTitle) {
+    final spans = <InlineSpan>[];
+
+    final usedPrefix = _usedPrefix();
+    if (usedPrefix.isNotEmpty) {
+      spans.add(
+        TextSpan(
+          text: '$usedPrefix ',
+          style: const TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.w900,
+            height: 1.34,
+            letterSpacing: -0.2,
+            color: Color(0xFFA56E5F),
+          ),
+        ),
+      );
+    }
+
+    spans.add(
+      TextSpan(
+        text: baseTitle,
+        style: const TextStyle(
+          fontSize: 24,
+          fontWeight: FontWeight.w900,
+          height: 1.34,
+          letterSpacing: -0.2,
+          color: Color(0xFF111111),
+        ),
+      ),
+    );
+
+    return TextSpan(children: spans);
   }
 
   @override
@@ -135,15 +190,8 @@ class _PostDetailContentSectionState extends State<PostDetailContentSection> {
               isOwnerVerified: widget.post.isOwnerVerified,
             ),
             const SizedBox(height: 14),
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.w900,
-                height: 1.34,
-                letterSpacing: -0.2,
-                color: Color(0xFF111111),
-              ),
+            Text.rich(
+              _buildStyledTitle(title),
             ),
             const SizedBox(height: 16),
             if (imagePaths.isNotEmpty) ...[
@@ -234,7 +282,7 @@ class _PostImageCard extends StatelessWidget {
   ImageProvider _buildProvider(File file) {
     return ResizeImage(
       FileImage(file),
-      width: 900,
+      width: 1200,
     );
   }
 

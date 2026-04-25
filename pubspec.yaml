@@ -11,11 +11,15 @@ dependencies:
   flutter:
     sdk: flutter
 
+  flutter_localizations:
+    sdk: flutter
+
   cupertino_icons: ^1.0.8
   get: ^4.6.6
   shared_preferences: ^2.2.3
   image_picker: ^1.0.7
   path_provider: ^2.1.5
+  flutter_image_compress: ^2.4.0
 
 dev_dependencies:
   flutter_test:

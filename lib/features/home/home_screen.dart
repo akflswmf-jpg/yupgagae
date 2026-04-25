@@ -7,7 +7,7 @@ import 'package:yupgagae/features/community/view/open_post_detail.dart';
 import 'package:yupgagae/features/community/view/widgets/post_row.dart';
 import 'package:yupgagae/features/home/widgets/home_top_bars.dart';
 
-enum HomeTab { hot, latest, owner }
+enum HomeTab { hot, latest, used, owner }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -52,6 +52,9 @@ class _HomeScreenState extends State<HomeScreen> {
       case HomeTab.hot:
       case HomeTab.latest:
         controller.loadMoreLatest();
+        break;
+      case HomeTab.used:
+        controller.loadMoreUsedLatest();
         break;
       case HomeTab.owner:
         controller.loadMoreOwnerLatest();
@@ -191,6 +194,16 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildUsedFeed() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildPosts(controller.usedLatest),
+        _buildLoadingMore(show: controller.isLoadingMoreUsed.value),
+      ],
+    );
+  }
+
   Widget _buildOwnerFeed() {
     if (!controller.isOwnerVerified.value) {
       return const _LockedOwnerNotice();
@@ -213,6 +226,8 @@ class _HomeScreenState extends State<HomeScreen> {
         return _buildMixedFeed();
       case HomeTab.latest:
         return _buildLatestOnlyFeed();
+      case HomeTab.used:
+        return _buildUsedFeed();
       case HomeTab.owner:
         return _buildOwnerFeed();
     }
@@ -255,6 +270,16 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(width: 4),
               Expanded(
                 child: _MinimalTab(
+                  label: '거래글',
+                  selected: tab.value == HomeTab.used,
+                  onTap: () => tab.value = HomeTab.used,
+                  selectedColor: _kYupgagaePrimary,
+                  selectedSoftColor: _kYupgagaePrimarySoft,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: _MinimalTab(
                   label: '사장님',
                   selected: tab.value == HomeTab.owner,
                   onTap: () => tab.value = HomeTab.owner,
@@ -282,6 +307,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Obx(() {
       final hotPosts = controller.hot;
       final latestPosts = controller.latest;
+      final usedLatestPosts = controller.usedLatest;
       final ownerHotPosts = controller.ownerHot;
       final ownerLatestPosts = controller.ownerLatest;
 
@@ -290,12 +316,15 @@ class _HomeScreenState extends State<HomeScreen> {
           ownerHotPosts.isEmpty;
       final showLatestLoading =
           controller.isLoadingLatest.value && latestPosts.isEmpty;
+      final showUsedLatestLoading =
+          controller.isLoadingUsedLatest.value && usedLatestPosts.isEmpty;
       final showOwnerLatestLoading =
           controller.isLoadingOwnerLatest.value && ownerLatestPosts.isEmpty;
 
       final showError = controller.error.value != null &&
           hotPosts.isEmpty &&
           latestPosts.isEmpty &&
+          usedLatestPosts.isEmpty &&
           ownerHotPosts.isEmpty &&
           ownerLatestPosts.isEmpty;
 
@@ -319,6 +348,15 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       if (tab.value == HomeTab.latest && showLatestLoading) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+
+      if (tab.value == HomeTab.used && showUsedLatestLoading) {
         return const Padding(
           padding: EdgeInsets.symmetric(vertical: 24),
           child: Center(

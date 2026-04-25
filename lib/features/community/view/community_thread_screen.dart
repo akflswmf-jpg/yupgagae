@@ -1,11 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 
 import 'package:yupgagae/features/community/controller/comment_controller.dart';
 import 'package:yupgagae/features/community/domain/comment.dart';
-import 'package:yupgagae/features/community/view/widgets/author_meta_line.dart';
-import 'package:yupgagae/features/my_store/controller/my_store_controller.dart';
-import 'package:yupgagae/features/my_store/domain/blocked_user_item.dart';
+import 'package:yupgagae/features/community/view/widgets/post_detail_comments_section.dart';
 
 const Color kThreadSnackBg = Color(0xFF875646);
 
@@ -24,10 +25,9 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
   final FocusNode _focusNode = FocusNode();
 
   final RxBool _isSubmittingLocal = false.obs;
+  final Map<String, GlobalKey> _commentItemKeys = <String, GlobalKey>{};
 
-  // 뒤로가기 중복 방지
   bool _isPopping = false;
-  // 답글/수정 성공 시 부모에 알림
   bool _didSubmit = false;
 
   String _postId = '';
@@ -113,6 +113,13 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     super.dispose();
   }
 
+  GlobalKey _keyForComment(String commentId) {
+    return _commentItemKeys.putIfAbsent(
+      commentId,
+      () => GlobalKey(debugLabel: 'thread_comment_$commentId'),
+    );
+  }
+
   String _timeLabel(DateTime dt) {
     final diff = DateTime.now().difference(dt);
     if (diff.inMinutes < 1) return '방금';
@@ -130,17 +137,15 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     _focusNode.unfocus();
   }
 
-  // 제출 전 키보드를 내린 뒤 키보드 애니메이션이 완료될 시간을 확보한다.
-  // 키보드 dismiss 중 Obx 리빌드가 겹치면 프레임 드랍이 생기기 때문이다.
-  Future<void> _settleKeyboardForSubmit() async {
+  void _dismissKeyboardForSubmit() {
     _dismissKeyboard();
-    await WidgetsBinding.instance.endOfFrame;
-    await Future.delayed(const Duration(milliseconds: 280));
   }
 
   void _scrollToBottom({bool animated = false}) {
     if (!mounted || !_scrollController.hasClients) return;
+
     final target = _scrollController.position.maxScrollExtent;
+
     if (animated) {
       _scrollController.animateTo(
         target,
@@ -149,7 +154,81 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
       );
       return;
     }
+
     _scrollController.jumpTo(target);
+  }
+
+  void _jumpNearTarget(String commentId) {
+    if (!mounted || !_scrollController.hasClients) return;
+
+    if (commentId == _rootCommentId) {
+      _scrollController.jumpTo(0);
+      return;
+    }
+
+    final index = c.replyIndexOf(
+      rootCommentId: _rootCommentId,
+      replyId: commentId,
+    );
+
+    if (index < 0) return;
+
+    final estimatedOffset = 120.0 + (index * 92.0);
+    final max = _scrollController.position.maxScrollExtent;
+
+    _scrollController.jumpTo(
+      estimatedOffset.clamp(0.0, max),
+    );
+  }
+
+  Future<void> _ensureCommentVisible(String commentId) async {
+    if (!mounted) return;
+
+    _jumpNearTarget(commentId);
+
+    for (var i = 0; i < 6; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
+      final targetContext = _commentItemKeys[commentId]?.currentContext;
+      if (targetContext == null) {
+        _jumpNearTarget(commentId);
+        continue;
+      }
+
+      await Scrollable.ensureVisible(
+        targetContext,
+        duration: Duration.zero,
+        alignment: 0.08,
+        curve: Curves.linear,
+      );
+      return;
+    }
+  }
+
+  Future<void> _forceRevealNewReply(String replyId) async {
+    if (replyId.trim().isEmpty) return;
+
+    for (var i = 0; i < 5; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
+      final targetContext = _commentItemKeys[replyId]?.currentContext;
+      if (targetContext != null) {
+        await Scrollable.ensureVisible(
+          targetContext,
+          duration: Duration.zero,
+          alignment: 0.78,
+          curve: Curves.linear,
+        );
+        return;
+      }
+
+      _scrollToBottom(animated: false);
+    }
+
+    if (!mounted) return;
+    _scrollToBottom(animated: false);
   }
 
   Future<void> _submit() async {
@@ -158,39 +237,54 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     if (_isSubmittingLocal.value) return;
     if (c.isSubmitting.value) return;
 
+    final editingId = _editingCommentId;
+
     _isSubmittingLocal.value = true;
+    _inputCtrl.clear();
+    _dismissKeyboardForSubmit();
 
     try {
-      await _settleKeyboardForSubmit();
-
-      if (_editingCommentId != null) {
+      if (editingId != null) {
         await c.updateComment(
-          commentId: _editingCommentId!,
+          commentId: editingId,
           text: text,
         );
+
+        _didSubmit = true;
+
+        if (!mounted) return;
+
+        setState(() {
+          _editingCommentId = null;
+        });
+
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          unawaited(_ensureCommentVisible(editingId));
+        });
+
         _showSnack('댓글을 수정했어요.');
       } else {
-        await c.reply(
+        final localId = await c.reply(
           parentCommentId: _rootCommentId,
           text: text,
         );
+
+        _didSubmit = true;
+
+        if (!mounted) return;
+
+        if (localId != null && localId.isNotEmpty) {
+          unawaited(_forceRevealNewReply(localId));
+        } else {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _scrollToBottom(animated: false);
+          });
+        }
+
         _showSnack('답글을 등록했어요.');
       }
-
-      _didSubmit = true;
-      _inputCtrl.clear();
-
-      if (!mounted) return;
-      setState(() {
-        _editingCommentId = null;
-      });
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        Future.delayed(const Duration(milliseconds: 70), () {
-          if (!mounted) return;
-          _scrollToBottom(animated: true);
-        });
-      });
     } catch (e) {
       _inputCtrl.text = text;
       _inputCtrl.selection = TextSelection.fromPosition(
@@ -207,27 +301,32 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
   void _startEdit(Comment comment) {
     if (comment.isDeleted || comment.isReportThresholdReached) return;
 
-    setState(() {
-      _editingCommentId = comment.id;
-      _inputCtrl.text = comment.text;
-    });
-
-    _focusNode.requestFocus();
+    _inputCtrl.text = comment.text;
     _inputCtrl.selection = TextSelection.fromPosition(
       TextPosition(offset: _inputCtrl.text.length),
     );
 
+    setState(() {
+      _editingCommentId = comment.id;
+    });
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollToBottom(animated: true);
+      if (!mounted) return;
+      _focusNode.requestFocus();
+      unawaited(_ensureCommentVisible(comment.id));
     });
   }
 
   void _cancelEdit() {
-    setState(() {
-      _editingCommentId = null;
+    _dismissKeyboard();
+
+    Future.delayed(const Duration(milliseconds: 180), () {
+      if (!mounted) return;
+      setState(() {
+        _editingCommentId = null;
+      });
       _inputCtrl.clear();
     });
-    _dismissKeyboard();
   }
 
   Future<void> _delete(Comment comment) async {
@@ -237,6 +336,7 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
       confirmText: '삭제',
       isDestructive: true,
     );
+
     if (!ok) return;
 
     _dismissKeyboard();
@@ -300,6 +400,7 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
         );
       },
     );
+
     return result ?? false;
   }
 
@@ -345,6 +446,7 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
 
   void _showSnack(String message) {
     if (!mounted) return;
+
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
@@ -371,22 +473,13 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients) return;
 
-      final replies = c.repliesOf(_rootCommentId);
-      final hasTarget =
-          _focusCommentId != null &&
-          replies.any((e) => e.id == _focusCommentId);
-
-      if (hasTarget) {
-        final index =
-            replies.indexWhere((e) => e.id == _focusCommentId) + 1;
-        final offset = index * 108.0;
-        _scrollController.jumpTo(
-          offset.clamp(0, _scrollController.position.maxScrollExtent),
-        );
+      final focusId = _focusCommentId;
+      if (focusId != null && focusId.isNotEmpty) {
+        unawaited(_ensureCommentVisible(focusId));
         return;
       }
 
-      _scrollToBottom();
+      _scrollToBottom(animated: false);
     });
   }
 
@@ -415,7 +508,6 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
             onPressed: () {
-              // _isPopping 가드: 연타해도 한 번만 pop
               if (_isPopping) return;
               _isPopping = true;
               _dismissKeyboard();
@@ -423,51 +515,64 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
             },
           ),
         ),
-        // body 안 Column으로 키보드 회피를 처리한다.
-        // bottomNavigationBar 높이가 키보드에 따라 변하면 Scaffold가
-        // body 전체를 relayout하면서 프레임 드랍이 생긴다.
-        // _KeyboardSpacer(단순 SizedBox)만 viewInsets를 읽어
-        // Material/Shadow 재페인트 없이 위치만 조정한다.
-        // SafeArea 래퍼는 제거: top은 AppBar가 처리, bottom은 _BottomReplyBar 내부가 처리.
-        // SafeArea(bottom: false)도 MediaQuery.of() 전체를 구독해 불필요한 리빌드를 유발한다.
-        body: Column(
-          children: [
-            Expanded(
-              child: _ThreadBodyList(
-                controller: c,
-                scrollController: _scrollController,
-                rootCommentId: _rootCommentId,
-                focusCommentId: _focusCommentId,
-                timeLabel: _timeLabel,
-                onEdit: _startEdit,
-                onDelete: _delete,
-                onReport: _report,
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                bottom: _editingCommentId == null ? 56 : 98,
+                child: _ThreadBodyList(
+                  controller: c,
+                  scrollController: _scrollController,
+                  rootCommentId: _rootCommentId,
+                  timeLabel: _timeLabel,
+                  itemKeyFor: _keyForComment,
+                  onEdit: _startEdit,
+                  onDelete: _delete,
+                  onReport: _report,
+                ),
               ),
-            ),
-            _BottomReplyBar(
-              controller: _inputCtrl,
-              focusNode: _focusNode,
-              isSubmitting: _isSubmittingLocal,
-              isEditing: _editingCommentId != null,
-              onCancelEdit: _cancelEdit,
-              onSubmit: _submit,
-            ),
-            const _KeyboardSpacer(),
-          ],
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _KeyboardInsetFollower(
+                  child: _BottomReplyBar(
+                    controller: _inputCtrl,
+                    focusNode: _focusNode,
+                    isSubmitting: _isSubmittingLocal,
+                    isEditing: _editingCommentId != null,
+                    onCancelEdit: _cancelEdit,
+                    onSubmit: _submit,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-// 키보드 높이만큼 공간을 차지하는 단순 위젯.
-// 이 위젯만 매 프레임 리빌드되고, _BottomReplyBar(Material+Shadow)는 건드리지 않는다.
-class _KeyboardSpacer extends StatelessWidget {
-  const _KeyboardSpacer();
+class _KeyboardInsetFollower extends StatelessWidget {
+  final Widget child;
+
+  const _KeyboardInsetFollower({
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(height: MediaQuery.viewInsetsOf(context).bottom);
+    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+
+    return RepaintBoundary(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: child,
+      ),
+    );
   }
 }
 
@@ -475,8 +580,8 @@ class _ThreadBodyList extends StatelessWidget {
   final CommentController controller;
   final ScrollController scrollController;
   final String rootCommentId;
-  final String? focusCommentId;
   final String Function(DateTime) timeLabel;
+  final GlobalKey Function(String commentId) itemKeyFor;
   final void Function(Comment comment) onEdit;
   final Future<void> Function(Comment comment) onDelete;
   final Future<void> Function(Comment comment) onReport;
@@ -485,8 +590,8 @@ class _ThreadBodyList extends StatelessWidget {
     required this.controller,
     required this.scrollController,
     required this.rootCommentId,
-    required this.focusCommentId,
     required this.timeLabel,
+    required this.itemKeyFor,
     required this.onEdit,
     required this.onDelete,
     required this.onReport,
@@ -495,26 +600,34 @@ class _ThreadBodyList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
-      child: ListView(
+      child: CustomScrollView(
         controller: scrollController,
         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-        children: [
-          _RootCommentCard(
-            rootId: rootCommentId,
-            controller: controller,
-            timeLabel: timeLabel,
-            onEdit: onEdit,
-            onDelete: onDelete,
-            onReport: onReport,
+        slivers: [
+          SliverToBoxAdapter(
+            child: Container(
+              key: itemKeyFor(rootCommentId),
+              child: _RootCommentCard(
+                rootId: rootCommentId,
+                controller: controller,
+                timeLabel: timeLabel,
+                onEdit: onEdit,
+                onDelete: onDelete,
+                onReport: onReport,
+              ),
+            ),
           ),
-          _RepliesHeader(
+          SliverToBoxAdapter(
+            child: _RepliesHeader(
+              controller: controller,
+              rootCommentId: rootCommentId,
+            ),
+          ),
+          _RepliesSliverList(
             controller: controller,
             rootCommentId: rootCommentId,
-          ),
-          _RepliesList(
-            controller: controller,
-            rootCommentId: rootCommentId,
             timeLabel: timeLabel,
+            itemKeyFor: itemKeyFor,
             onEdit: onEdit,
             onDelete: onDelete,
             onReport: onReport,
@@ -537,10 +650,9 @@ class _RepliesHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      final myStore = Get.find<MyStoreController>();
-      final blockedIds = myStore.blockedUsers.map((e) => e.userId).toSet();
-      final replies = controller.repliesOf(rootCommentId);
-      final count = replies.where((r) => !blockedIds.contains(r.authorId)).length;
+      controller.comments.length;
+
+      final count = controller.replyCountOf(rootCommentId);
 
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 2, 16, 4),
@@ -557,18 +669,20 @@ class _RepliesHeader extends StatelessWidget {
   }
 }
 
-class _RepliesList extends StatelessWidget {
+class _RepliesSliverList extends StatelessWidget {
   final CommentController controller;
   final String rootCommentId;
   final String Function(DateTime) timeLabel;
+  final GlobalKey Function(String commentId) itemKeyFor;
   final void Function(Comment comment) onEdit;
   final Future<void> Function(Comment comment) onDelete;
   final Future<void> Function(Comment comment) onReport;
 
-  const _RepliesList({
+  const _RepliesSliverList({
     required this.controller,
     required this.rootCommentId,
     required this.timeLabel,
+    required this.itemKeyFor,
     required this.onEdit,
     required this.onDelete,
     required this.onReport,
@@ -577,30 +691,31 @@ class _RepliesList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      final myStore = Get.find<MyStoreController>();
-      final blockedIds = myStore.blockedUsers.map((e) => e.userId).toSet();
-      final replies = controller.repliesOf(rootCommentId);
-      final visibleReplies = replies
-          .where((r) => !blockedIds.contains(r.authorId))
-          .toList(growable: false);
+      controller.comments.length;
 
-      return Column(
-        children: [
-          for (final reply in visibleReplies)
-            // ValueKey: 새 답글 추가 시 기존 카드를 element 재사용으로 처리,
-            // RepaintBoundary: 개별 카드 내부 상태 변화가 이웃 카드에 영향 없음
-            RepaintBoundary(
-              key: ValueKey(reply.id),
-              child: _ReplyCommentCard(
-                replyId: reply.id,
-                controller: controller,
-                timeLabel: timeLabel,
-                onEdit: onEdit,
-                onDelete: onDelete,
-                onReport: onReport,
+      final replies = controller.repliesOf(rootCommentId);
+
+      return SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final reply = replies[index];
+
+            return Container(
+              key: itemKeyFor(reply.id),
+              child: RepaintBoundary(
+                child: _ReplyCommentCard(
+                  replyId: reply.id,
+                  controller: controller,
+                  timeLabel: timeLabel,
+                  onEdit: onEdit,
+                  onDelete: onDelete,
+                  onReport: onReport,
+                ),
               ),
-            ),
-        ],
+            );
+          },
+          childCount: replies.length,
+        ),
       );
     });
   }
@@ -623,41 +738,29 @@ class _RootCommentCard extends StatelessWidget {
     required this.onReport,
   });
 
-  Future<void> _blockUser(Comment root) async {
-    final myStore = Get.find<MyStoreController>();
-    await myStore.blockUser(
-      BlockedUserItem(
-        userId: root.authorId,
-        nickname:
-            root.authorLabel.trim().isEmpty ? '익명' : root.authorLabel,
-        industry: root.industryId,
-        region: root.locationLabel,
-        blockedAt: DateTime.now(),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Obx(() {
+      controller.comments.length;
+
       final root = controller.commentById(rootId);
       if (root == null) return const SizedBox.shrink();
 
-      final myStore = Get.find<MyStoreController>();
-      final blockedIds = myStore.blockedUsers.map((e) => e.userId).toSet();
-
-      if (blockedIds.contains(root.authorId)) {
-        return const SizedBox.shrink();
-      }
-
-      final blocked = root.isDeleted || root.isReportThresholdReached;
-      final isMine = root.authorId == controller.currentUserId;
-      final isLikedByMe =
-          root.likedUserIds.contains(controller.currentUserId);
-      final likeColor =
-          isLikedByMe ? const Color(0xFFE5484D) : const Color(0xFF6B7280);
-
-      return Container(
+      return CommunityCommentCard(
+        comment: root,
+        depth: 0,
+        currentUserId: controller.currentUserId,
+        timeLabel: timeLabel,
+        onReplyTap: (_) async {},
+        onEditTap: (comment) async => onEdit(comment),
+        onDeleteTap: onDelete,
+        onReportTap: onReport,
+        onToggleLikeTap: (comment) async {
+          await controller.toggleLike(comment.id);
+        },
+        replyLabel: '답글',
+        showReplyAction: false,
+        denseMeta: true,
         margin: const EdgeInsets.fromLTRB(14, 12, 14, 8),
         padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
         decoration: BoxDecoration(
@@ -665,118 +768,31 @@ class _RootCommentCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: const Color(0xFFE7E9EE)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AuthorMetaLine(
-              industryId: root.industryId,
-              locationLabel: root.locationLabel,
-              nicknameLabel: root.authorLabel,
-              timeLabel: timeLabel(root.createdAt),
-              dense: true,
-              isOwnerVerified: root.isOwnerVerified,
-            ),
-            const SizedBox(height: 7),
-            Text(
-              root.isDeleted
-                  ? '삭제된 댓글입니다.'
-                  : root.isReportThresholdReached
-                      ? '블라인드 처리된 댓글입니다.'
-                      : root.text,
-              style: TextStyle(
-                fontSize: 14,
-                height: 1.45,
-                color: blocked
-                    ? const Color(0xFF9CA3AF)
-                    : const Color(0xFF1F2937),
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            if (!blocked) ...[
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 12,
-                runSpacing: 6,
-                children: [
-                  _InlineTextAction(
-                    onTap: () async {
-                      await controller.toggleLike(root.id);
-                    },
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          isLikedByMe
-                              ? Icons.favorite
-                              : Icons.favorite_border,
-                          size: 14,
-                          color: likeColor,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${root.likeCount}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: likeColor,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (isMine)
-                    _InlineTextAction(
-                      onTap: () async => onEdit(root),
-                      child: const Text(
-                        '수정',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF6B7280),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  if (isMine)
-                    _InlineTextAction(
-                      onTap: () async => onDelete(root),
-                      child: const Text(
-                        '삭제',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFFE5484D),
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                  if (!isMine)
-                    _InlineTextAction(
-                      onTap: () async => onReport(root),
-                      child: const Text(
-                        '신고',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF6B7280),
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                  if (!isMine)
-                    _InlineTextAction(
-                      onTap: () async => _blockUser(root),
-                      child: const Text(
-                        '차단',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFFE5484D),
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ],
+        bodyLeftInset: 0,
+        actionLeftInset: 0,
+        replyArrowPadding: const EdgeInsets.only(right: 5),
+        replyArrowSize: 14,
+        actionSpacing: 12,
+        actionRunSpacing: 6,
+        moreIconSize: 16,
+        likeIconSize: 14,
+        likeTextSize: 12,
+        moreIconColor: const Color(0xFF6B7280),
+        deletedText: '삭제된 댓글입니다.',
+        blindedText: '블라인드 처리된 댓글입니다.',
+        textStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF1F2937),
+          fontWeight: FontWeight.w500,
         ),
+        blockedTextStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF9CA3AF),
+          fontWeight: FontWeight.w500,
+        ),
+        actionTopSpacing: 8,
       );
     });
   }
@@ -799,41 +815,29 @@ class _ReplyCommentCard extends StatelessWidget {
     required this.onReport,
   });
 
-  Future<void> _blockUser(Comment reply) async {
-    final myStore = Get.find<MyStoreController>();
-    await myStore.blockUser(
-      BlockedUserItem(
-        userId: reply.authorId,
-        nickname:
-            reply.authorLabel.trim().isEmpty ? '익명' : reply.authorLabel,
-        industry: reply.industryId,
-        region: reply.locationLabel,
-        blockedAt: DateTime.now(),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Obx(() {
+      controller.comments.length;
+
       final reply = controller.commentById(replyId);
       if (reply == null) return const SizedBox.shrink();
 
-      final myStore = Get.find<MyStoreController>();
-      final blockedIds = myStore.blockedUsers.map((e) => e.userId).toSet();
-
-      if (blockedIds.contains(reply.authorId)) {
-        return const SizedBox.shrink();
-      }
-
-      final blocked = reply.isDeleted || reply.isReportThresholdReached;
-      final isMine = reply.authorId == controller.currentUserId;
-      final isLikedByMe =
-          reply.likedUserIds.contains(controller.currentUserId);
-      final likeColor =
-          isLikedByMe ? const Color(0xFFE5484D) : const Color(0xFF6B7280);
-
-      return Container(
+      return CommunityCommentCard(
+        comment: reply,
+        depth: 1,
+        currentUserId: controller.currentUserId,
+        timeLabel: timeLabel,
+        onReplyTap: (_) async {},
+        onEditTap: (comment) async => onEdit(comment),
+        onDeleteTap: onDelete,
+        onReportTap: onReport,
+        onToggleLikeTap: (comment) async {
+          await controller.toggleLike(comment.id);
+        },
+        replyLabel: '답글 보기',
+        showReplyAction: false,
+        denseMeta: true,
         margin: const EdgeInsets.fromLTRB(14, 0, 14, 0),
         padding: const EdgeInsets.fromLTRB(10, 10, 10, 9),
         decoration: const BoxDecoration(
@@ -841,138 +845,31 @@ class _ReplyCommentCard extends StatelessWidget {
             bottom: BorderSide(color: Color(0xFFF1F3F5)),
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Padding(
-                  padding: EdgeInsets.only(right: 5),
-                  child: Icon(
-                    Icons.subdirectory_arrow_right_rounded,
-                    size: 14,
-                    color: Color(0xFF9CA3AF),
-                  ),
-                ),
-                Expanded(
-                  child: AuthorMetaLine(
-                    industryId: reply.industryId,
-                    locationLabel: reply.locationLabel,
-                    nicknameLabel: reply.authorLabel,
-                    timeLabel: timeLabel(reply.createdAt),
-                    dense: true,
-                    isOwnerVerified: reply.isOwnerVerified,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.only(left: 19),
-              child: Text(
-                reply.isDeleted
-                    ? '삭제된 댓글입니다.'
-                    : reply.isReportThresholdReached
-                        ? '블라인드 처리된 댓글입니다.'
-                        : reply.text,
-                style: TextStyle(
-                  fontSize: 14,
-                  height: 1.45,
-                  color: blocked
-                      ? const Color(0xFF9CA3AF)
-                      : const Color(0xFF1F2937),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-            if (!blocked) ...[
-              const SizedBox(height: 7),
-              Padding(
-                padding: const EdgeInsets.only(left: 19),
-                child: Wrap(
-                  spacing: 12,
-                  runSpacing: 6,
-                  children: [
-                    _InlineTextAction(
-                      onTap: () async {
-                        await controller.toggleLike(reply.id);
-                      },
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            isLikedByMe
-                                ? Icons.favorite
-                                : Icons.favorite_border,
-                            size: 14,
-                            color: likeColor,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            '${reply.likeCount}',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: likeColor,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (isMine)
-                      _InlineTextAction(
-                        onTap: () async => onEdit(reply),
-                        child: const Text(
-                          '수정',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF6B7280),
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    if (isMine)
-                      _InlineTextAction(
-                        onTap: () async => onDelete(reply),
-                        child: const Text(
-                          '삭제',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFFE5484D),
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    if (!isMine)
-                      _InlineTextAction(
-                        onTap: () async => onReport(reply),
-                        child: const Text(
-                          '신고',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF6B7280),
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    if (!isMine)
-                      _InlineTextAction(
-                        onTap: () async => _blockUser(reply),
-                        child: const Text(
-                          '차단',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFFE5484D),
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ],
+        bodyLeftInset: 19,
+        actionLeftInset: 19,
+        replyArrowPadding: const EdgeInsets.only(right: 5),
+        replyArrowSize: 14,
+        actionSpacing: 12,
+        actionRunSpacing: 6,
+        moreIconSize: 16,
+        likeIconSize: 14,
+        likeTextSize: 12,
+        moreIconColor: const Color(0xFF6B7280),
+        deletedText: '삭제된 댓글입니다.',
+        blindedText: '블라인드 처리된 댓글입니다.',
+        textStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF1F2937),
+          fontWeight: FontWeight.w500,
         ),
+        blockedTextStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF9CA3AF),
+          fontWeight: FontWeight.w500,
+        ),
+        actionTopSpacing: 7,
       );
     });
   }
@@ -997,154 +894,142 @@ class _BottomReplyBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // viewPaddingOf: 물리적 홈 인디케이터 높이(34px 등)만 읽는다.
-    // viewInsets(키보드)와 무관하므로 키보드 애니메이션 중 이 위젯은 절대 리빌드되지 않는다.
-    // 키보드 공간은 부모 Column의 _KeyboardSpacer가 전담한다.
     final safeBottom = MediaQuery.viewPaddingOf(context).bottom;
+
     return RepaintBoundary(
       child: Material(
         color: Colors.white,
         elevation: 8,
         child: Padding(
-            padding: EdgeInsets.fromLTRB(14, 8, 14, 8 + safeBottom),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (isEditing)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(
-                      children: [
-                        const Expanded(
-                          child: Text(
-                            '댓글 수정 중',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF6B7280),
-                            ),
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: onCancelEdit,
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 4,
-                            ),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: const Text(
-                            '취소',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF6B7280),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(minHeight: 38),
-                        child: TextField(
-                          controller: controller,
-                          focusNode: focusNode,
-                          minLines: 1,
-                          maxLines: 3,
-                          textInputAction: TextInputAction.send,
-                          onSubmitted: (_) => onSubmit(),
-                          decoration: InputDecoration(
-                            hintText:
-                                isEditing ? '댓글을 수정하세요.' : '답글을 입력하세요.',
-                            hintStyle: const TextStyle(
-                              color: Color(0xFF9CA3AF),
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
-                            isDense: true,
-                            border: InputBorder.none,
-                            enabledBorder: InputBorder.none,
-                            focusedBorder: InputBorder.none,
-                            disabledBorder: InputBorder.none,
-                            errorBorder: InputBorder.none,
-                            focusedErrorBorder: InputBorder.none,
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 0,
-                              vertical: 8,
-                            ),
-                          ),
-                          style: const TextStyle(
-                            color: Color(0xFF111111),
-                            fontSize: 14,
-                            height: 1.35,
-                            fontWeight: FontWeight.w500,
+          padding: EdgeInsets.fromLTRB(14, 8, 14, 8 + safeBottom),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isEditing)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          '댓글 수정 중',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF6B7280),
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 10),
-                    Obx(() {
-                      final enabled = !isSubmitting.value;
-                      return TextButton(
-                        onPressed: enabled ? onSubmit : null,
+                      TextButton(
+                        onPressed: onCancelEdit,
                         style: TextButton.styleFrom(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 6,
-                            vertical: 8,
+                            vertical: 4,
                           ),
                           minimumSize: Size.zero,
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                        child: Text(
-                          isEditing ? '수정' : '등록',
+                        child: const Text(
+                          '취소',
                           style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w800,
-                            color: enabled
-                                ? const Color(0xFF875646)
-                                : const Color(0xFFB6A79F),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF6B7280),
                           ),
                         ),
-                      );
-                    }),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
-              ],
-            ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 38),
+                      child: TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        inputFormatters: [
+                          LengthLimitingTextInputFormatter(
+                            CommentController.maxCommentLength,
+                          ),
+                        ],
+                        maxLength: CommentController.maxCommentLength,
+                        maxLengthEnforcement: MaxLengthEnforcement.enforced,
+                        buildCounter: (
+                          context, {
+                          required currentLength,
+                          required isFocused,
+                          required maxLength,
+                        }) {
+                          return null;
+                        },
+                        minLines: 1,
+                        maxLines: 3,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => onSubmit(),
+                        decoration: InputDecoration(
+                          hintText:
+                              isEditing ? '댓글을 수정하세요.' : '답글을 입력하세요.',
+                          hintStyle: const TextStyle(
+                            color: Color(0xFF9CA3AF),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          isDense: true,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          errorBorder: InputBorder.none,
+                          focusedErrorBorder: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 0,
+                            vertical: 8,
+                          ),
+                        ),
+                        style: const TextStyle(
+                          color: Color(0xFF111111),
+                          fontSize: 14,
+                          height: 1.35,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Obx(() {
+                    final enabled = !isSubmitting.value;
+
+                    return TextButton(
+                      onPressed: enabled ? onSubmit : null,
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 8,
+                        ),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: Text(
+                        isEditing ? '수정' : '등록',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                          color: enabled
+                              ? const Color(0xFF875646)
+                              : const Color(0xFFB6A79F),
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ],
           ),
         ),
-    );
-  }
-}
-
-class _InlineTextAction extends StatelessWidget {
-  final Widget child;
-  final Future<void> Function() onTap;
-
-  const _InlineTextAction({
-    required this.child,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: () async {
-        await onTap();
-      },
-      borderRadius: BorderRadius.circular(6),
-      splashColor: const Color(0x08000000),
-      highlightColor: const Color(0x04000000),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1, vertical: 2),
-        child: child,
       ),
     );
   }

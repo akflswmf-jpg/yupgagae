@@ -3,21 +3,21 @@ import 'package:flutter/services.dart';
 class PostComposeTextFormatter extends TextInputFormatter {
   const PostComposeTextFormatter();
 
+  static const int _maxConsecutiveNewLines = 3;
+
   @override
   TextEditingValue formatEditUpdate(
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
-    var text = newValue.text.replaceAll('\r\n', '\n');
+    var text = newValue.text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
 
     text = text.replaceFirst(RegExp(r'^\n+'), '');
 
     text = text.replaceAllMapped(
-      RegExp(r'([ㄱ-ㅎㅏ-ㅣ])\n'),
-      (match) => match.group(1)!,
+      RegExp(r'\n{4,}'),
+      (_) => '\n' * _maxConsecutiveNewLines,
     );
-
-    text = text.replaceAll(RegExp(r'\n{3,}'), '\n\n');
 
     if (text == newValue.text) {
       return newValue;

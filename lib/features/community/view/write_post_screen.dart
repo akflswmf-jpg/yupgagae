@@ -46,8 +46,13 @@ class _WritePostScreenState extends State<WritePostScreen> {
   late final Worker _titleWorker;
   late final Worker _bodyWorker;
 
-  final List<TextInputFormatter> _bodyInputFormatters = const [
-    PostComposeTextFormatter(),
+  late final List<TextInputFormatter> _titleInputFormatters = [
+    LengthLimitingTextInputFormatter(WritePostController.maxTitleLength),
+  ];
+
+  late final List<TextInputFormatter> _bodyInputFormatters = [
+    const PostComposeTextFormatter(),
+    LengthLimitingTextInputFormatter(WritePostController.maxBodyLength),
   ];
 
   @override
@@ -135,14 +140,26 @@ class _WritePostScreenState extends State<WritePostScreen> {
 
   String _screenTitle() {
     if (c.isEditMode) return '글 수정';
-    return c.boardType == BoardType.owner ? '사장님 글쓰기' : '자유 글쓰기';
+
+    switch (c.boardType) {
+      case BoardType.owner:
+        return '사장님 글쓰기';
+      case BoardType.used:
+        return '거래게시판 글쓰기';
+      case BoardType.free:
+        return '자유 글쓰기';
+    }
   }
 
   String _bodyHint() {
-    if (c.boardType == BoardType.owner) {
-      return '가게 운영 이야기, 고민, 팁을 편하게 공유하세요';
+    switch (c.boardType) {
+      case BoardType.owner:
+        return '가게 운영 이야기, 고민, 팁을 편하게 공유하세요';
+      case BoardType.used:
+        return '양식을 넣어서 빠르게 작성하거나 자유롭게 적어주세요';
+      case BoardType.free:
+        return '동네 이야기, 질문, 정보 등을 편하게 공유하세요';
     }
-    return '동네 이야기, 질문, 정보 등을 편하게 공유하세요';
   }
 
   Future<void> _submit() async {
@@ -152,6 +169,26 @@ class _WritePostScreenState extends State<WritePostScreen> {
     final ok = await c.submit();
     if (ok) {
       Get.back(result: true);
+    }
+  }
+
+  String _usedTypeLabel(UsedPostType type) {
+    switch (type) {
+      case UsedPostType.store:
+        return '가게양도';
+      case UsedPostType.item:
+        return '중고거래';
+    }
+  }
+
+  String _usedTemplateGuide(UsedPostType? type) {
+    switch (type) {
+      case UsedPostType.store:
+        return '업종, 지역, 보증금/권리금, 월세 등의 양식입니다.';
+      case UsedPostType.item:
+        return '품목명, 사용 기간, 희망 가격, 거래 지역 등의 양식입니다.';
+      case null:
+        return '거래 유형을 먼저 선택해주세요.';
     }
   }
 
@@ -223,15 +260,106 @@ class _WritePostScreenState extends State<WritePostScreen> {
                 child: _ErrorBanner(text: msg),
               );
             }),
+            if (c.boardType == BoardType.used) ...[
+              const _SectionLabel(label: '거래 유형'),
+              const SizedBox(height: 10),
+              Obx(() {
+                final selected = c.selectedUsedType.value;
+
+                return Row(
+                  children: UsedPostType.values.map((type) {
+                    final isSelected = selected == type;
+                    return Expanded(
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          right: type == UsedPostType.store ? 8 : 0,
+                          left: type == UsedPostType.item ? 8 : 0,
+                        ),
+                        child: _UsedTypeChoiceCard(
+                          label: _usedTypeLabel(type),
+                          selected: isSelected,
+                          onTap: () => c.setUsedType(type),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                );
+              }),
+              const SizedBox(height: 10),
+              Obx(() {
+                final selected = c.selectedUsedType.value;
+
+                return Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF9FAFB),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _usedTemplateGuide(selected),
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          height: 1.45,
+                          color: Color(0xFF4B5563),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton(
+                          onPressed: selected == null
+                              ? null
+                              : () => c.applyUsedTemplate(force: true),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: kWriteAccentDark,
+                            side: const BorderSide(color: Color(0xFFE5E7EB)),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                          child: const Text(
+                            '양식 넣기',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+              const SizedBox(height: 18),
+            ],
             _UnderlineInputSection(
               child: TextField(
                 controller: titleCtrl,
+                inputFormatters: _titleInputFormatters,
+                maxLength: WritePostController.maxTitleLength,
+                maxLengthEnforcement: MaxLengthEnforcement.enforced,
                 textInputAction: TextInputAction.next,
                 maxLines: 1,
-                onChanged: (value) => c.title.value = value,
+                onChanged: c.setTitle,
                 decoration: const InputDecoration(
                   hintText: '제목을 입력하세요',
                   hintStyle: _kWriteHintStyle,
+                  counterStyle: TextStyle(
+                    fontSize: 11,
+                    height: 1.2,
+                    color: Color(0xFF9CA3AF),
+                    fontWeight: FontWeight.w600,
+                  ),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
                   focusedBorder: InputBorder.none,
@@ -251,13 +379,21 @@ class _WritePostScreenState extends State<WritePostScreen> {
               child: TextField(
                 controller: bodyCtrl,
                 inputFormatters: _bodyInputFormatters,
+                maxLength: WritePostController.maxBodyLength,
+                maxLengthEnforcement: MaxLengthEnforcement.enforced,
                 maxLines: null,
                 minLines: 14,
                 textAlignVertical: TextAlignVertical.top,
-                onChanged: (value) => c.body.value = value,
+                onChanged: c.setBody,
                 decoration: InputDecoration(
                   hintText: bodyHint,
                   hintStyle: _kWriteHintStyle,
+                  counterStyle: const TextStyle(
+                    fontSize: 11,
+                    height: 1.2,
+                    color: Color(0xFF9CA3AF),
+                    fontWeight: FontWeight.w600,
+                  ),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
                   focusedBorder: InputBorder.none,
@@ -273,9 +409,11 @@ class _WritePostScreenState extends State<WritePostScreen> {
               ),
             ),
             const SizedBox(height: 10),
-            const Text(
-              '비방·허위정보·과도한 광고글은 제재될 수 있습니다.',
-              style: TextStyle(
+            Text(
+              c.boardType == BoardType.used
+                  ? '허위 매물·사기 의심·과도한 광고글은 제재될 수 있습니다.'
+                  : '비방·허위정보·과도한 광고글은 제재될 수 있습니다.',
+              style: const TextStyle(
                 fontSize: 11.8,
                 height: 1.35,
                 color: Color(0xFF6B7280),
@@ -401,6 +539,73 @@ class _WritePostScreenState extends State<WritePostScreen> {
               );
             }),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final String label;
+
+  const _SectionLabel({
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w800,
+        color: Color(0xFF111827),
+      ),
+    );
+  }
+}
+
+class _UsedTypeChoiceCard extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _UsedTypeChoiceCard({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          decoration: BoxDecoration(
+            color: selected ? kWriteAccentSoft : Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: selected ? kWriteAccent : const Color(0xFFE5E7EB),
+              width: selected ? 1.4 : 1,
+            ),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                color: selected ? kWriteAccentDark : const Color(0xFF374151),
+              ),
+            ),
+          ),
         ),
       ),
     );

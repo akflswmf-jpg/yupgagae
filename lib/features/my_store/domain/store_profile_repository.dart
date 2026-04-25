@@ -5,6 +5,8 @@ import 'package:yupgagae/features/my_store/domain/blocked_user_item.dart';
 import 'package:yupgagae/features/my_store/domain/store_profile.dart';
 
 abstract class StoreProfileRepository {
+  Future<void> warmUp();
+
   // =========================
   // 기존 (절대 삭제 금지)
   // =========================

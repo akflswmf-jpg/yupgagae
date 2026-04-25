@@ -22,20 +22,25 @@ class HomeFeedController extends GetxController {
   final mostCommented = <Post>[].obs;
   final ownerHot = <Post>[].obs;
   final latest = <Post>[].obs;
+  final usedLatest = <Post>[].obs;
   final ownerLatest = <Post>[].obs;
 
   final isOwnerVerified = false.obs;
 
   String? _cursor;
+  String? _usedCursor;
   String? _ownerCursor;
 
   final hasMore = true.obs;
+  final hasMoreUsed = true.obs;
   final hasMoreOwner = true.obs;
 
   final isLoadingTop = false.obs;
   final isLoadingLatest = false.obs;
+  final isLoadingUsedLatest = false.obs;
   final isLoadingOwnerLatest = false.obs;
   final isLoadingMore = false.obs;
+  final isLoadingMoreUsed = false.obs;
   final isLoadingMoreOwner = false.obs;
 
   final error = RxnString();
@@ -61,6 +66,7 @@ class HomeFeedController extends GetxController {
       refreshOwnerVerification(),
       loadTop(),
       refreshLatest(),
+      refreshUsedLatest(),
       refreshOwnerLatest(),
     ]);
   }
@@ -138,6 +144,31 @@ class HomeFeedController extends GetxController {
     }
   }
 
+  Future<void> refreshUsedLatest() async {
+    isLoadingUsedLatest.value = true;
+    error.value = null;
+
+    try {
+      _usedCursor = null;
+      hasMoreUsed.value = true;
+
+      final PostPage page = await repo.fetchLatestPage(
+        cursor: _usedCursor,
+        limit: latestLimit,
+        boardType: BoardType.used,
+      );
+
+      usedLatest.assignAll(_dedupeById(page.items));
+      _usedCursor = page.nextCursor;
+      hasMoreUsed.value = page.nextCursor != null;
+    } catch (e, s) {
+      error.value = e.toString();
+      debugPrint('HOME refreshUsedLatest error: $e\n$s');
+    } finally {
+      isLoadingUsedLatest.value = false;
+    }
+  }
+
   Future<void> refreshOwnerLatest() async {
     isLoadingOwnerLatest.value = true;
     error.value = null;
@@ -191,6 +222,39 @@ class HomeFeedController extends GetxController {
     }
   }
 
+  Future<void> loadMoreUsedLatest() async {
+    if (!hasMoreUsed.value ||
+        isLoadingUsedLatest.value ||
+        isLoadingMoreUsed.value) {
+      return;
+    }
+
+    isLoadingMoreUsed.value = true;
+
+    try {
+      final PostPage page = await repo.fetchLatestPage(
+        cursor: _usedCursor,
+        limit: latestLimit,
+        boardType: BoardType.used,
+      );
+
+      if (page.items.isNotEmpty) {
+        final merged = <Post>[
+          ...usedLatest,
+          ...page.items,
+        ];
+        usedLatest.assignAll(_dedupeById(merged));
+      }
+
+      _usedCursor = page.nextCursor;
+      hasMoreUsed.value = page.nextCursor != null;
+    } catch (e, s) {
+      debugPrint('HOME loadMoreUsedLatest error: $e\n$s');
+    } finally {
+      isLoadingMoreUsed.value = false;
+    }
+  }
+
   Future<void> loadMoreOwnerLatest() async {
     if (!hasMoreOwner.value ||
         isLoadingOwnerLatest.value ||
@@ -239,6 +303,7 @@ class HomeFeedController extends GetxController {
 
   void applyPost(Post updated) {
     _replacePostInList(latest, updated);
+    _replacePostInList(usedLatest, updated);
     _replacePostInList(ownerLatest, updated);
     _replacePostInList(hot, updated);
     _replacePostInList(mostCommented, updated);
@@ -249,6 +314,7 @@ class HomeFeedController extends GetxController {
 
   void removePost(String postId) {
     latest.removeWhere((p) => p.id == postId);
+    usedLatest.removeWhere((p) => p.id == postId);
     ownerLatest.removeWhere((p) => p.id == postId);
     hot.removeWhere((p) => p.id == postId);
     mostCommented.removeWhere((p) => p.id == postId);
@@ -301,7 +367,7 @@ class HomeFeedController extends GetxController {
   }
 
   void _replacePostInList(RxList<Post> list, Post updated) {
-    final index = list.indexWhere((e) => e.id == updated.id);
+    final index = list.indexWhere((item) => item.id == updated.id);
     if (index != -1) {
       list[index] = updated;
     }
@@ -311,8 +377,7 @@ class HomeFeedController extends GetxController {
     final resortedHot = List<Post>.from(hot)..sort(_compareHotPosts);
     final resortedMostCommented = List<Post>.from(mostCommented)
       ..sort(_compareMostCommentedPosts);
-    final resortedOwnerHot =
-        List<Post>.from(ownerHot)..sort(_compareHotPosts);
+    final resortedOwnerHot = List<Post>.from(ownerHot)..sort(_compareHotPosts);
 
     hot.assignAll(_dedupeById(resortedHot.take(topLimit).toList()));
     mostCommented.assignAll(
@@ -348,6 +413,7 @@ class HomeFeedController extends GetxController {
     debugPrint('Assigned hot count: ${hot.length}');
     debugPrint('Assigned comment count: ${mostCommented.length}');
     debugPrint('Assigned owner hot count: ${ownerHot.length}');
+    debugPrint('Assigned used latest count: ${usedLatest.length}');
     debugPrint('Assigned owner latest count: ${ownerLatest.length}');
     debugPrint('====================================================');
   }

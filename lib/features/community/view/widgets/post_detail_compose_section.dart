@@ -33,62 +33,55 @@ class PostDetailComposeSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
-
     return RepaintBoundary(
-      child: AnimatedPadding(
-        duration: const Duration(milliseconds: 110),
-        curve: Curves.easeOutCubic,
-        padding: EdgeInsets.only(bottom: keyboardInset),
-        child: DecoratedBox(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            border: Border(
-              top: BorderSide(color: Color(0xFFF1F3F5)),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Color(0x0D000000),
-                blurRadius: 10,
-                offset: Offset(0, -2),
-              ),
-            ],
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(
+            top: BorderSide(color: Color(0xFFF1F3F5)),
           ),
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              12,
-              10,
-              12,
-              math.max(10, safeBottom),
+          boxShadow: [
+            BoxShadow(
+              color: Color(0x0D000000),
+              blurRadius: 10,
+              offset: Offset(0, -2),
             ),
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 180),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeOutCubic,
-              transitionBuilder: (child, animation) {
-                return FadeTransition(
-                  opacity: animation,
-                  child: SizeTransition(
-                    sizeFactor: animation,
-                    axisAlignment: -1,
-                    child: child,
+          ],
+        ),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            12,
+            10,
+            12,
+            math.max(10, safeBottom),
+          ),
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 180),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeOutCubic,
+            transitionBuilder: (child, animation) {
+              return FadeTransition(
+                opacity: animation,
+                child: SizeTransition(
+                  sizeFactor: animation,
+                  axisAlignment: -1,
+                  child: child,
+                ),
+              );
+            },
+            child: submitting
+                ? const _SubmittingPanel(key: ValueKey('submitting'))
+                : _ComposePanel(
+                    key: const ValueKey('compose'),
+                    isComposeMode: _isComposeMode,
+                    editingId: editingId,
+                    replyTo: replyTo,
+                    onCancelComposeMode: onCancelComposeMode,
+                    textController: textController,
+                    focusNode: focusNode,
+                    inputFormatters: inputFormatters,
+                    onSubmitComment: onSubmitComment,
                   ),
-                );
-              },
-              child: submitting
-                  ? const _SubmittingPanel(key: ValueKey('submitting'))
-                  : _ComposePanel(
-                      key: const ValueKey('compose'),
-                      isComposeMode: _isComposeMode,
-                      editingId: editingId,
-                      replyTo: replyTo,
-                      onCancelComposeMode: onCancelComposeMode,
-                      textController: textController,
-                      focusNode: focusNode,
-                      inputFormatters: inputFormatters,
-                      onSubmitComment: onSubmitComment,
-                    ),
-            ),
           ),
         ),
       ),

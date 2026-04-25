@@ -3,7 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/service/anon_session_service.dart';
 import 'package:yupgagae/features/community/controller/owner_board_controller.dart';
+import 'package:yupgagae/features/community/controller/post_list_controller.dart';
+import 'package:yupgagae/features/community/domain/post.dart';
+import 'package:yupgagae/features/community/domain/post_repository.dart';
 import 'package:yupgagae/features/community/view/free_board_feed_screen.dart';
 import 'package:yupgagae/features/community/view/owner_board_screen.dart';
 
@@ -21,18 +25,34 @@ class _CommunityShellState extends State<CommunityShell>
   late final TabController _tabController;
 
   OwnerBoardController? _ownerBoardController;
+  PostListController? _freeBoardController;
+  PostListController? _usedBoardController;
+
   Timer? _prewarmTimer;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
+
+    _freeBoardController = Get.find<PostListController>();
+
+    if (Get.isRegistered<PostListController>(tag: 'used_board')) {
+      _usedBoardController = Get.find<PostListController>(tag: 'used_board');
+    } else {
+      _usedBoardController = Get.put<PostListController>(
+        PostListController(
+          repo: Get.find<PostRepository>(),
+          session: Get.find<AnonSessionService>(),
+          boardType: BoardType.used,
+        ),
+        tag: 'used_board',
+      );
+    }
 
     if (Get.isRegistered<OwnerBoardController>()) {
       _ownerBoardController = Get.find<OwnerBoardController>();
 
-      // 첫 프레임 직후 바로 prewarm 하지 말고 살짝 지연시켜
-      // 커뮤니티 진입 순간의 프레임 부하를 분산한다.
       _prewarmTimer = Timer(const Duration(milliseconds: 420), () {
         if (!mounted) return;
         _ownerBoardController?.prewarm();
@@ -89,6 +109,7 @@ class _CommunityShellState extends State<CommunityShell>
                 tabs: const [
                   Tab(text: '자유게시판'),
                   Tab(text: '사장님게시판'),
+                  Tab(text: '거래게시판'),
                 ],
               ),
             ),
@@ -97,8 +118,19 @@ class _CommunityShellState extends State<CommunityShell>
                 controller: _tabController,
                 physics: const BouncingScrollPhysics(),
                 children: [
-                  const _KeepAliveTab(child: FreeBoardFeedScreen()),
-                  const _KeepAliveTab(child: OwnerBoardScreen()),
+                  _KeepAliveTab(
+                    child: FreeBoardFeedScreen(
+                      controller: _freeBoardController,
+                    ),
+                  ),
+                  const _KeepAliveTab(
+                    child: OwnerBoardScreen(),
+                  ),
+                  _KeepAliveTab(
+                    child: FreeBoardFeedScreen(
+                      controller: _usedBoardController,
+                    ),
+                  ),
                 ],
               ),
             ),

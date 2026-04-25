@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 
 import 'app/bindings/root_binding.dart';
@@ -15,7 +16,17 @@ class YeopgaGaeApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: '옆가게',
       theme: buildAppTheme(),
-
+      locale: const Locale('ko', 'KR'),
+      fallbackLocale: const Locale('ko', 'KR'),
+      supportedLocales: const [
+        Locale('ko', 'KR'),
+        Locale('en', 'US'),
+      ],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       initialBinding: RootBinding(),
       initialRoute: AppRoutes.root,
       getPages: AppPages.pages,

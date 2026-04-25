@@ -25,6 +25,7 @@ class PostDetailController extends GetxController {
   final error = RxnString();
   final isDeleting = false.obs;
   final isReporting = false.obs;
+  final isTogglingSold = false.obs;
 
   String? _postId;
   bool _didInitialize = false;
@@ -71,9 +72,7 @@ class PostDetailController extends GetxController {
 
       try {
         await repoDyn.ensureReady();
-      } catch (_) {
-        // ensureReady가 없는 구현도 허용
-      }
+      } catch (_) {}
 
       final loaded = await repo.getPostById(postId);
       post.value = loaded;
@@ -117,9 +116,7 @@ class PostDetailController extends GetxController {
       post.value = current.copyWith(
         viewCount: current.viewCount + 1,
       );
-    } catch (_) {
-      // 조회수 증가 실패는 상세 화면 진입을 막지 않음
-    }
+    } catch (_) {}
   }
 
   Future<void> _notifyPostAuthorForLike({
@@ -176,11 +173,45 @@ class PostDetailController extends GetxController {
           before: current,
           after: updated,
         );
-      } catch (_) {
-        // 알림 실패가 좋아요 동작 자체를 막으면 안 됨
-      }
+      } catch (_) {}
     } catch (e) {
       error.value = e.toString();
+    }
+  }
+
+  Future<Post> toggleSold() async {
+    final current = post.value;
+    if (current == null) {
+      throw Exception('게시글이 없습니다.');
+    }
+
+    if (current.boardType != BoardType.used) {
+      throw Exception('거래 게시글만 처리할 수 있습니다.');
+    }
+
+    if (!isOwner) {
+      throw Exception('처리 권한이 없습니다.');
+    }
+
+    if (isTogglingSold.value) {
+      throw Exception('처리 중입니다.');
+    }
+
+    isTogglingSold.value = true;
+    error.value = null;
+
+    try {
+      final updated = await repo.toggleSold(
+        postId: current.id,
+        userId: currentUserId,
+      );
+      post.value = updated;
+      return updated;
+    } catch (e) {
+      error.value = e.toString();
+      rethrow;
+    } finally {
+      isTogglingSold.value = false;
     }
   }
 

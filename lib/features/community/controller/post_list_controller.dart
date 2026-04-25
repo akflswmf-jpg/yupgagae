@@ -33,6 +33,8 @@ class PostListController extends GetxController {
   final searchField = PostSearchField.all.obs;
   final searchFieldKey = 'all'.obs;
 
+  final selectedUsedType = Rxn<UsedPostType>();
+
   String? _cursor;
   Timer? _debounce;
 
@@ -40,6 +42,7 @@ class PostListController extends GetxController {
 
   String get currentUserId => session.anonId;
   bool get hasInitializedFeed => _feedInitialized;
+  bool get isUsedBoard => boardType == BoardType.used;
 
   List<Post> get visiblePosts {
     final myStore = Get.find<MyStoreController>();
@@ -48,6 +51,13 @@ class PostListController extends GetxController {
     Iterable<Post> filtered = posts
         .where((p) => p.boardType == boardType)
         .where((p) => !blockedIds.contains(p.authorId));
+
+    if (isUsedBoard) {
+      final usedType = selectedUsedType.value;
+      if (usedType != null) {
+        filtered = filtered.where((p) => p.usedType == usedType);
+      }
+    }
 
     final industries = selectedIndustryIds.toSet();
     if (industries.isNotEmpty) {
@@ -125,6 +135,7 @@ class PostListController extends GetxController {
     selectedIndustryIds.clear();
     selectedIndustryId.value = null;
     selectedRegionLabel.value = null;
+    selectedUsedType.value = null;
     await initLoad();
   }
 
@@ -176,6 +187,16 @@ class PostListController extends GetxController {
 
   Future<void> clearRegion() async {
     selectedRegionLabel.value = null;
+    await initLoad();
+  }
+
+  Future<void> setUsedType(UsedPostType? type) async {
+    selectedUsedType.value = type;
+    await initLoad();
+  }
+
+  Future<void> clearUsedType() async {
+    selectedUsedType.value = null;
     await initLoad();
   }
 
@@ -243,6 +264,7 @@ class PostListController extends GetxController {
         limit: 20,
         searchQuery: _effectiveQuery(),
         boardType: boardType,
+        usedType: isUsedBoard ? selectedUsedType.value : null,
         industryId: _repoIndustryId(),
         locationLabel: selectedRegionLabel.value,
         searchField: searchField.value,

@@ -1,4 +1,4 @@
-enum BoardType { free, owner }
+enum BoardType { free, owner, used }
 
 extension BoardTypeX on BoardType {
   String get key {
@@ -7,6 +7,8 @@ extension BoardTypeX on BoardType {
         return 'free';
       case BoardType.owner:
         return 'owner';
+      case BoardType.used:
+        return 'used';
     }
   }
 }
@@ -15,9 +17,38 @@ BoardType boardTypeFromKey(String? value) {
   switch ((value ?? '').trim().toLowerCase()) {
     case 'owner':
       return BoardType.owner;
+    case 'used':
+      return BoardType.used;
     case 'free':
     default:
       return BoardType.free;
+  }
+}
+
+enum UsedPostType {
+  store,
+  item,
+}
+
+extension UsedPostTypeX on UsedPostType {
+  String get key {
+    switch (this) {
+      case UsedPostType.store:
+        return 'store';
+      case UsedPostType.item:
+        return 'item';
+    }
+  }
+}
+
+UsedPostType? usedPostTypeFromKey(String? value) {
+  switch ((value ?? '').trim().toLowerCase()) {
+    case 'store':
+      return UsedPostType.store;
+    case 'item':
+      return UsedPostType.item;
+    default:
+      return null;
   }
 }
 
@@ -31,6 +62,9 @@ class Post {
   final String body;
 
   final BoardType boardType;
+  final UsedPostType? usedType;
+
+  final bool isSold;
 
   final String? industryId;
   final String? locationLabel;
@@ -57,6 +91,8 @@ class Post {
     required this.body,
     required this.createdAt,
     this.boardType = BoardType.free,
+    this.usedType,
+    this.isSold = false,
     this.industryId,
     this.locationLabel,
     this.commentCount = 0,
@@ -79,6 +115,8 @@ class Post {
     String? title,
     String? body,
     BoardType? boardType,
+    UsedPostType? usedType,
+    bool? isSold,
     String? industryId,
     String? locationLabel,
     DateTime? createdAt,
@@ -99,6 +137,8 @@ class Post {
       title: title ?? this.title,
       body: body ?? this.body,
       boardType: boardType ?? this.boardType,
+      usedType: usedType ?? this.usedType,
+      isSold: isSold ?? this.isSold,
       industryId: industryId ?? this.industryId,
       locationLabel: locationLabel ?? this.locationLabel,
       createdAt: createdAt ?? this.createdAt,
@@ -124,6 +164,8 @@ class Post {
       'title': title,
       'body': body,
       'boardType': boardType.key,
+      'usedType': usedType?.key,
+      'isSold': isSold,
       'industryId': industryId,
       'locationLabel': locationLabel,
       'createdAt': createdAt.toIso8601String(),
@@ -147,6 +189,8 @@ class Post {
       title: (json['title'] ?? '').toString(),
       body: (json['body'] ?? '').toString(),
       boardType: boardTypeFromKey(json['boardType']?.toString()),
+      usedType: usedPostTypeFromKey(json['usedType']?.toString()),
+      isSold: (json['isSold'] as bool?) ?? false,
       industryId: json['industryId']?.toString(),
       locationLabel: json['locationLabel']?.toString(),
       createdAt:
