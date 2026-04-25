@@ -17,10 +17,10 @@ abstract class PostRepository {
 
   Future<Post> getPostById(String postId);
 
+  /// 서버형 계약:
+  /// 작성자 id / 닉네임 / 인증 여부는 클라이언트가 넘기지 않는다.
+  /// 서버 구현체에서는 Auth 토큰 + 사용자 프로필에서 결정한다.
   Future<Post> createPost({
-    required String authorId,
-    required String authorLabel,
-    required bool isOwnerVerified,
     required String title,
     required String body,
     required BoardType boardType,
@@ -30,20 +30,26 @@ abstract class PostRepository {
     List<String>? imagePaths,
   });
 
+  /// 서버형 계약:
+  /// 수정 권한은 서버가 현재 로그인 유저 기준으로 판단한다.
   Future<Post> updatePost({
     required String postId,
-    required String userId,
     required String title,
     required String body,
     UsedPostType? usedType,
     List<String>? imagePaths,
   });
 
-  Future<Post> toggleLike({required String postId, required String userId});
+  /// 서버형 계약:
+  /// 좋아요 누른 사람은 서버가 현재 로그인 유저 기준으로 판단한다.
+  Future<Post> toggleLike({
+    required String postId,
+  });
 
+  /// 서버형 계약:
+  /// 판매완료 권한은 서버가 현재 로그인 유저 기준으로 판단한다.
   Future<Post> toggleSold({
     required String postId,
-    required String userId,
   });
 
   Future<void> incrementView(String postId);
@@ -59,73 +65,70 @@ abstract class PostRepository {
     PostSearchField searchField = PostSearchField.all,
   });
 
-  Future<bool> canDeletePost({required String postId, required String userId});
-  Future<void> deletePost({required String postId, required String userId});
+  /// 서버형 계약:
+  /// 삭제 가능 여부는 서버가 현재 로그인 유저 기준으로 판단한다.
+  Future<bool> canDeletePost({
+    required String postId,
+  });
 
+  Future<void> deletePost({
+    required String postId,
+  });
+
+  /// 서버형 계약:
+  /// 신고자는 서버가 현재 로그인 유저 기준으로 판단한다.
   Future<void> reportPost({
     required String postId,
-    required String reporterId,
     required String reason,
   });
 
   Future<List<Comment>> fetchComments(String postId);
 
+  /// 서버형 계약:
+  /// 댓글 작성자 정보는 서버가 현재 로그인 유저 프로필 기준으로 붙인다.
   Future<Comment> addComment({
     required String postId,
-    required String authorId,
-    required String authorLabel,
-    bool isOwnerVerified = false,
-    String? industryId,
-    String? locationLabel,
     required String text,
   });
 
   Future<Comment> addReply({
     required String postId,
     required String parentCommentId,
-    required String authorId,
-    required String authorLabel,
-    bool isOwnerVerified = false,
-    String? industryId,
-    String? locationLabel,
     required String text,
   });
 
   Future<Comment> toggleCommentLike({
     required String postId,
     required String commentId,
-    required String userId,
   });
 
   Future<bool> canDeleteComment({
     required String postId,
     required String commentId,
-    required String userId,
   });
 
   Future<void> deleteComment({
     required String postId,
     required String commentId,
-    required String userId,
   });
 
   Future<void> reportComment({
     required String postId,
     required String commentId,
-    required String reporterId,
     required String reason,
   });
 
   Future<Comment> updateComment({
     required String postId,
     required String commentId,
-    required String userId,
     required String text,
   });
 
-  Future<List<Post>> fetchMyPosts(String userId);
+  /// 서버형 계약:
+  /// 내 글/댓글은 현재 로그인 유저 기준이다.
+  Future<List<Post>> fetchMyPosts();
 
-  Future<List<Comment>> fetchMyComments(String userId);
+  Future<List<Comment>> fetchMyComments();
 }
 
 abstract class ModerationService {}

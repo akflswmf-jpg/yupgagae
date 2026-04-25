@@ -47,9 +47,13 @@ class MyStoreController extends GetxController {
     return notifications.where((e) => !e.isRead).length;
   }
 
-  bool get hasLoadedMyPosts => myPosts.isNotEmpty || isLoadingMyPosts.value == false;
-  bool get hasLoadedMyComments =>
-      myComments.isNotEmpty || isLoadingMyComments.value == false;
+  bool get hasLoadedMyPosts {
+    return myPosts.isNotEmpty || isLoadingMyPosts.value == false;
+  }
+
+  bool get hasLoadedMyComments {
+    return myComments.isNotEmpty || isLoadingMyComments.value == false;
+  }
 
   @override
   void onInit() {
@@ -63,10 +67,7 @@ class MyStoreController extends GetxController {
       error.value = null;
 
       final result = await repo.fetchProfile();
-
-      profile.value = result;
-      notifications.assignAll(result.notifications);
-      blockedUsers.assignAll(result.blockedUsers);
+      _applyProfile(result);
     } catch (_) {
       error.value = '내가게 정보를 불러오지 못했습니다.';
     } finally {
@@ -82,7 +83,7 @@ class MyStoreController extends GetxController {
       isLoadingMyPosts.value = true;
       myActivityError.value = null;
 
-      final result = await postRepo.fetchMyPosts(currentUserId);
+      final result = await postRepo.fetchMyPosts();
       myPosts.assignAll(result);
     } catch (e) {
       myActivityError.value = e.toString();
@@ -99,7 +100,7 @@ class MyStoreController extends GetxController {
       isLoadingMyComments.value = true;
       myActivityError.value = null;
 
-      final result = await postRepo.fetchMyComments(currentUserId);
+      final result = await postRepo.fetchMyComments();
       myComments.assignAll(result);
     } catch (e) {
       myActivityError.value = e.toString();
@@ -129,39 +130,28 @@ class MyStoreController extends GetxController {
 
     try {
       isSavingNickname.value = true;
+      error.value = null;
 
       final updated = await repo.updateNickname(normalized);
-
-      profile.value = updated;
+      _applyProfile(updated);
     } finally {
       isSavingNickname.value = false;
     }
   }
 
-  Future<void> setNotificationsEnabled(bool enabled) async {
-    try {
-      isSavingNotification.value = true;
-
-      final updated = await repo.updateNotificationsEnabled(enabled);
-
-      profile.value = updated;
-    } finally {
-      isSavingNotification.value = false;
-    }
-  }
-
   Future<void> changeIndustry(String industry) async {
     final normalized = industry.trim();
+
     if (normalized.isEmpty) {
       throw Exception('업종을 선택하세요.');
     }
 
     try {
       isSavingIndustry.value = true;
+      error.value = null;
 
       final updated = await repo.updateIndustry(normalized);
-
-      profile.value = updated;
+      _applyProfile(updated);
     } finally {
       isSavingIndustry.value = false;
     }
@@ -169,54 +159,142 @@ class MyStoreController extends GetxController {
 
   Future<void> changeRegion(String region) async {
     final normalized = region.trim();
+
     if (normalized.isEmpty) {
       throw Exception('지역을 선택하세요.');
     }
 
     try {
       isSavingRegion.value = true;
+      error.value = null;
 
       final updated = await repo.updateRegion(normalized);
-
-      profile.value = updated;
+      _applyProfile(updated);
     } finally {
       isSavingRegion.value = false;
     }
   }
 
-  Future<void> markNotificationRead(String id) async {
-    final updated = await repo.markAsRead(id);
+  Future<void> setNotificationsEnabled(bool enabled) async {
+    try {
+      isSavingNotification.value = true;
+      error.value = null;
 
-    profile.value = updated;
-    notifications.assignAll(updated.notifications);
+      final updated = await repo.updateNotificationsEnabled(enabled);
+      _applyProfile(updated);
+    } finally {
+      isSavingNotification.value = false;
+    }
+  }
+
+  Future<void> updateNotificationEnabled(bool enabled) async {
+    await setNotificationsEnabled(enabled);
+  }
+
+  Future<void> markNotificationRead(String notificationId) async {
+    final id = notificationId.trim();
+    if (id.isEmpty) return;
+
+    final updated = await repo.markAsRead(id);
+    _applyProfile(updated);
+  }
+
+  Future<void> markNotificationAsRead(String notificationId) async {
+    await markNotificationRead(notificationId);
   }
 
   Future<void> markAllNotificationsRead() async {
     final updated = await repo.markAllRead();
+    _applyProfile(updated);
+  }
 
-    profile.value = updated;
-    notifications.assignAll(updated.notifications);
+  Future<void> markAllNotificationsAsRead() async {
+    await markAllNotificationsRead();
   }
 
   Future<void> addNotification(AppNotificationItem item) async {
     final updated = await repo.addNotification(item);
+    _applyProfile(updated);
+  }
+
+  Future<void> removeNotification(String notificationId) async {
+    final id = notificationId.trim();
+    if (id.isEmpty) return;
+
+    final p = profile.value;
+    if (p == null) return;
+
+    final nextNotifications =
+        p.notifications.where((e) => e.id != id).toList(growable: false);
+
+    final updated = p.copyWith(
+      notifications: nextNotifications,
+    );
 
     profile.value = updated;
     notifications.assignAll(updated.notifications);
   }
 
-  Future<void> blockUser(BlockedUserItem user) async {
-    final updated = await repo.blockUser(user);
+  Future<void> clearNotifications() async {
+    final updated = await repo.clearNotifications();
+    _applyProfile(updated);
+  }
 
-    profile.value = updated;
-    blockedUsers.assignAll(updated.blockedUsers);
+  Future<void> blockUser(BlockedUserItem user) async {
+    final targetId = user.userId.trim();
+    if (targetId.isEmpty) return;
+
+    final updated = await repo.blockUser(user);
+    _applyProfile(updated);
+  }
+
+  Future<void> blockUserByInfo({
+    required String userId,
+    required String nickname,
+    String? industry,
+    String? region,
+    String? reason,
+  }) async {
+    final targetId = userId.trim();
+    if (targetId.isEmpty) return;
+
+    await blockUser(
+      BlockedUserItem(
+        userId: targetId,
+        nickname: nickname.trim().isEmpty ? '익명' : nickname.trim(),
+        industry: industry,
+        region: region,
+        blockedAt: DateTime.now(),
+      ),
+    );
   }
 
   Future<void> unblockUser(String userId) async {
-    final updated = await repo.unblockUser(userId);
+    final targetId = userId.trim();
+    if (targetId.isEmpty) return;
 
-    profile.value = updated;
-    blockedUsers.assignAll(updated.blockedUsers);
+    final updated = await repo.unblockUser(targetId);
+    _applyProfile(updated);
+  }
+
+  Future<void> verifyOwnerForDev() async {
+    final current = profile.value ?? await repo.fetchProfile();
+
+    final updated = current.copyWith(
+      isOwnerVerified: true,
+    );
+
+    _applyProfile(updated);
+  }
+
+  Future<void> clearOwnerVerificationForDev() async {
+    final current = profile.value ?? await repo.fetchProfile();
+
+    final updated = current.copyWith(
+      isOwnerVerified: false,
+    );
+
+    _applyProfile(updated);
   }
 
   void applyDeletedPost(String postId) {
@@ -229,6 +307,12 @@ class MyStoreController extends GetxController {
 
     final next = List<Post>.from(myPosts);
     next[index] = updated;
-    myPosts.value = next;
+    myPosts.assignAll(next);
+  }
+
+  void _applyProfile(StoreProfile updated) {
+    profile.value = updated;
+    notifications.assignAll(updated.notifications);
+    blockedUsers.assignAll(updated.blockedUsers);
   }
 }

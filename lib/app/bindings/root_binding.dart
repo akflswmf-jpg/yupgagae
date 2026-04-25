@@ -53,6 +53,7 @@ class RootBinding extends Bindings {
       Get.lazyPut<PostRepository>(
         () => InMemoryPostRepository(
           currentUserId: Get.find<AnonSessionService>().anonId,
+          storeProfileRepo: Get.find<StoreProfileRepository>(),
         ),
         fenix: true,
       );

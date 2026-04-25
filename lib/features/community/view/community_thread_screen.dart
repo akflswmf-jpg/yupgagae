@@ -265,17 +265,18 @@ class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
 
         _showSnack('댓글을 수정했어요.');
       } else {
-        final localId = await c.reply(
+        final createdReply = await c.reply(
           parentCommentId: _rootCommentId,
           text: text,
         );
 
+        final replyId = createdReply.id;
         _didSubmit = true;
 
         if (!mounted) return;
 
-        if (localId != null && localId.isNotEmpty) {
-          unawaited(_forceRevealNewReply(localId));
+        if (replyId.trim().isNotEmpty) {
+          unawaited(_forceRevealNewReply(replyId));
         } else {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
@@ -854,7 +855,7 @@ class _ReplyCommentCard extends StatelessWidget {
         moreIconSize: 16,
         likeIconSize: 14,
         likeTextSize: 12,
-        moreIconColor: const Color(0xFF6B7280),
+        moreIconColor: Color(0xFF6B7280),
         deletedText: '삭제된 댓글입니다.',
         blindedText: '블라인드 처리된 댓글입니다.',
         textStyle: const TextStyle(

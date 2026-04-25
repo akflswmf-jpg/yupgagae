@@ -5,17 +5,23 @@ import 'dart:math';
 import 'package:path_provider/path_provider.dart';
 
 import 'package:yupgagae/features/community/domain/comment.dart';
+import 'package:yupgagae/features/community/domain/industry_catalog.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_page.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
+import 'package:yupgagae/features/community/domain/region_catalog.dart';
+import 'package:yupgagae/features/my_store/domain/store_profile.dart';
+import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart';
 
 class InMemoryPostRepository implements PostRepository {
   final ModerationService? moderation;
   final String currentUserId;
+  final StoreProfileRepository? storeProfileRepo;
 
   InMemoryPostRepository({
     this.moderation,
     String? currentUserId,
+    this.storeProfileRepo,
   }) : currentUserId = currentUserId ?? 'anon_local';
 
   final _posts = <Post>[];
@@ -24,6 +30,8 @@ class InMemoryPostRepository implements PostRepository {
 
   bool _isLoaded = false;
   Future<void>? _loadFuture;
+
+  String get _me => currentUserId;
 
   @override
   Future<void> warmUp() async {
@@ -59,11 +67,14 @@ class InMemoryPostRepository implements PostRepository {
       };
 
       await file.writeAsString(jsonEncode(data));
-    } catch (_) {}
+    } catch (_) {
+      // 로컬 저장 실패는 앱 흐름을 막지 않는다.
+    }
   }
 
   Future<void> _ensureLoaded() async {
     if (_isLoaded) return;
+
     _loadFuture ??= _loadFromDisk();
     await _loadFuture;
   }
@@ -71,21 +82,24 @@ class InMemoryPostRepository implements PostRepository {
   Future<void> _loadFromDisk() async {
     try {
       final file = await _storeFile();
+
       if (!await file.exists()) {
         _isLoaded = true;
         return;
       }
 
       final raw = await file.readAsString();
+
       if (raw.trim().isEmpty) {
         _isLoaded = true;
         return;
       }
 
-      final Map<String, dynamic> json = jsonDecode(raw);
+      final Map<String, dynamic> json =
+          Map<String, dynamic>.from(jsonDecode(raw) as Map);
 
-      final loadedPosts = ((json['posts'] as List?) ?? [])
-          .map((e) => Post.fromJson(Map<String, dynamic>.from(e)))
+      final loadedPosts = ((json['posts'] as List?) ?? const [])
+          .map((e) => Post.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList();
 
       _posts
@@ -93,17 +107,58 @@ class InMemoryPostRepository implements PostRepository {
         ..addAll(loadedPosts);
 
       _commentsByPostId.clear();
-      final rawComments = (json['commentsByPostId'] as Map?) ?? {};
+
+      final rawComments = (json['commentsByPostId'] as Map?) ?? const {};
       rawComments.forEach((key, value) {
-        final list = (value as List)
-            .map((e) => Comment.fromJson(Map<String, dynamic>.from(e)))
+        final list = ((value as List?) ?? const [])
+            .map((e) => Comment.fromJson(Map<String, dynamic>.from(e as Map)))
             .toList()
           ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
         _commentsByPostId[key.toString()] = list;
       });
     } catch (_) {
+      _posts.clear();
+      _commentsByPostId.clear();
     } finally {
       _isLoaded = true;
+    }
+  }
+
+  Future<_LocalAuthorSnapshot> _currentAuthorSnapshot() async {
+    try {
+      final repo = storeProfileRepo;
+      if (repo == null) {
+        return _LocalAuthorSnapshot.fallback(_me);
+      }
+
+      final StoreProfile profile = await repo.fetchProfile();
+
+      final nickname = profile.nickname.trim().isEmpty
+          ? '익명'
+          : profile.nickname.trim();
+
+      String? industryId;
+      final profileIndustry = profile.industry.trim();
+
+      if (profileIndustry.isNotEmpty) {
+        for (final item in IndustryCatalog.ordered()) {
+          if (item.id == profileIndustry || item.name == profileIndustry) {
+            industryId = item.id;
+            break;
+          }
+        }
+      }
+
+      return _LocalAuthorSnapshot(
+        authorId: _me,
+        authorLabel: nickname,
+        isOwnerVerified: profile.isOwnerVerified,
+        industryId: industryId,
+        locationLabel: RegionCatalog.normalize(profile.region),
+      );
+    } catch (_) {
+      return _LocalAuthorSnapshot.fallback(_me);
     }
   }
 
@@ -144,16 +199,59 @@ class InMemoryPostRepository implements PostRepository {
     }
   }
 
+  int _compareLatest(Post a, Post b) {
+    return b.createdAt.compareTo(a.createdAt);
+  }
+
+  int _compareHot(Post a, Post b) {
+    final aScore = (a.likeCount * 3) + (a.commentCount * 2) + a.viewCount;
+    final bScore = (b.likeCount * 3) + (b.commentCount * 2) + b.viewCount;
+
+    final scoreCompare = bScore.compareTo(aScore);
+    if (scoreCompare != 0) return scoreCompare;
+
+    return _compareLatest(a, b);
+  }
+
+  int _compareMostCommented(Post a, Post b) {
+    final commentCompare = b.commentCount.compareTo(a.commentCount);
+    if (commentCompare != 0) return commentCompare;
+
+    return _compareLatest(a, b);
+  }
+
+  List<Post> _visiblePosts() {
+    return _posts
+        .where((p) => !p.isReportThresholdReached)
+        .toList(growable: false);
+  }
+
   void _syncPostCommentCount(String postId) {
     final idx = _indexOfPost(postId);
     if (idx < 0) return;
 
     final comments = _commentsByPostId[postId] ?? const <Comment>[];
-    final activeCount = comments.where((c) => !c.isDeleted).length;
+    final visibleCount = comments.where((c) => !c.isDeleted).length;
 
     _posts[idx] = _posts[idx].copyWith(
-      commentCount: activeCount,
+      commentCount: visibleCount,
     );
+  }
+
+  void _replacePostInMemory(Post updated) {
+    final idx = _indexOfPost(updated.id);
+    if (idx < 0) return;
+
+    _posts[idx] = updated;
+  }
+
+  @override
+  Future<List<Post>> fetchHomeTopPosts({int limit = 100}) async {
+    await _ensureLoaded();
+
+    final list = _visiblePosts()..sort(_compareLatest);
+
+    return list.take(limit).toList(growable: false);
   }
 
   @override
@@ -164,29 +262,19 @@ class InMemoryPostRepository implements PostRepository {
     await _ensureLoaded();
 
     final list = _applyBoardFilter(
-      List<Post>.from(_posts),
+      _visiblePosts(),
       boardType: boardType,
     );
 
     switch (sort) {
       case PostSort.latest:
-        list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        list.sort(_compareLatest);
         break;
       case PostSort.hot:
-        list.sort((a, b) {
-          final aScore = (a.likeCount * 3) + (a.commentCount * 4) + a.viewCount;
-          final bScore = (b.likeCount * 3) + (b.commentCount * 4) + b.viewCount;
-          final byScore = bScore.compareTo(aScore);
-          if (byScore != 0) return byScore;
-          return b.createdAt.compareTo(a.createdAt);
-        });
+        list.sort(_compareHot);
         break;
       case PostSort.mostCommented:
-        list.sort((a, b) {
-          final byCount = b.commentCount.compareTo(a.commentCount);
-          if (byCount != 0) return byCount;
-          return b.createdAt.compareTo(a.createdAt);
-        });
+        list.sort(_compareMostCommented);
         break;
     }
 
@@ -194,23 +282,171 @@ class InMemoryPostRepository implements PostRepository {
   }
 
   @override
-  Future<List<Post>> fetchHomeTopPosts({int limit = 100}) async {
-    await _ensureLoaded();
-
-    final list = List<Post>.from(_posts)
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-    return list.take(limit).toList();
-  }
-
-  @override
   Future<Post> getPostById(String postId) async {
     await _ensureLoaded();
 
     final idx = _indexOfPost(postId);
-    if (idx >= 0) return _posts[idx];
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
 
-    throw Exception('Post not found');
+    return _posts[idx];
+  }
+
+  @override
+  Future<Post> createPost({
+    required String title,
+    required String body,
+    required BoardType boardType,
+    UsedPostType? usedType,
+    String? industryId,
+    String? locationLabel,
+    List<String>? imagePaths,
+  }) async {
+    await _ensureLoaded();
+
+    final author = await _currentAuthorSnapshot();
+
+    final post = Post(
+      id: _id(),
+      authorId: author.authorId,
+      authorLabel: author.authorLabel,
+      isOwnerVerified: author.isOwnerVerified,
+      title: title,
+      body: body,
+      boardType: boardType,
+      usedType: boardType == BoardType.used ? usedType : null,
+      isSold: false,
+      industryId: industryId ?? author.industryId,
+      locationLabel: locationLabel ?? author.locationLabel,
+      createdAt: DateTime.now(),
+      commentCount: 0,
+      likeCount: 0,
+      viewCount: 0,
+      reportCount: 0,
+      reportedUserIds: <String>{},
+      isReportThresholdReached: false,
+      imagePaths: imagePaths ?? const <String>[],
+      likedUserIds: <String>{},
+    );
+
+    _posts.insert(0, post);
+    await _saveToDisk();
+
+    return post;
+  }
+
+  @override
+  Future<Post> updatePost({
+    required String postId,
+    required String title,
+    required String body,
+    UsedPostType? usedType,
+    List<String>? imagePaths,
+  }) async {
+    await _ensureLoaded();
+
+    final idx = _indexOfPost(postId);
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
+
+    final current = _posts[idx];
+
+    if (current.authorId != _me) {
+      throw Exception('수정 권한이 없습니다.');
+    }
+
+    final updated = current.copyWith(
+      title: title,
+      body: body,
+      usedType: current.boardType == BoardType.used ? usedType : current.usedType,
+      imagePaths: imagePaths ?? current.imagePaths,
+    );
+
+    _posts[idx] = updated;
+    await _saveToDisk();
+
+    return updated;
+  }
+
+  @override
+  Future<Post> toggleLike({
+    required String postId,
+  }) async {
+    await _ensureLoaded();
+
+    final idx = _indexOfPost(postId);
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
+
+    final current = _posts[idx];
+    final liked = Set<String>.from(current.likedUserIds);
+
+    if (liked.contains(_me)) {
+      liked.remove(_me);
+    } else {
+      liked.add(_me);
+    }
+
+    final updated = current.copyWith(
+      likedUserIds: liked,
+      likeCount: liked.length,
+    );
+
+    _posts[idx] = updated;
+    await _saveToDisk();
+
+    return updated;
+  }
+
+  @override
+  Future<Post> toggleSold({
+    required String postId,
+  }) async {
+    await _ensureLoaded();
+
+    final idx = _indexOfPost(postId);
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
+
+    final current = _posts[idx];
+
+    if (current.authorId != _me) {
+      throw Exception('판매 상태 변경 권한이 없습니다.');
+    }
+
+    if (current.boardType != BoardType.used) {
+      throw Exception('거래 게시글만 판매 상태를 변경할 수 있습니다.');
+    }
+
+    final updated = current.copyWith(
+      isSold: !current.isSold,
+    );
+
+    _posts[idx] = updated;
+    await _saveToDisk();
+
+    return updated;
+  }
+
+  @override
+  Future<void> incrementView(String postId) async {
+    await _ensureLoaded();
+
+    final idx = _indexOfPost(postId);
+    if (idx < 0) return;
+
+    final current = _posts[idx];
+
+    final updated = current.copyWith(
+      viewCount: current.viewCount + 1,
+    );
+
+    _posts[idx] = updated;
+    await _saveToDisk();
   }
 
   @override
@@ -226,42 +462,57 @@ class InMemoryPostRepository implements PostRepository {
   }) async {
     await _ensureLoaded();
 
-    var sorted = _applyBoardFilter(
-      List<Post>.from(_posts),
+    var list = _visiblePosts();
+
+    list = _applyBoardFilter(
+      list,
       boardType: boardType,
     );
 
-    sorted = _applyUsedTypeFilter(
-      sorted,
+    list = _applyUsedTypeFilter(
+      list,
       usedType: usedType,
     );
 
-    if (industryId != null && industryId.trim().isNotEmpty) {
-      sorted = sorted
-          .where((p) => (p.industryId ?? '').trim() == industryId.trim())
-          .toList();
+    final industry = industryId?.trim();
+    if (industry != null && industry.isNotEmpty) {
+      list = list.where((p) => p.industryId == industry).toList();
     }
 
-    if (locationLabel != null && locationLabel.trim().isNotEmpty) {
-      sorted = sorted
-          .where((p) => (p.locationLabel ?? '').trim() == locationLabel.trim())
-          .toList();
+    final location = locationLabel?.trim();
+    if (location != null && location.isNotEmpty) {
+      list = list.where((p) => p.locationLabel == location).toList();
     }
 
-    if (searchQuery != null && searchQuery.trim().isNotEmpty) {
-      sorted = sorted
-          .where((p) => _matchesSearch(p, searchQuery, searchField))
-          .toList();
+    final query = searchQuery?.trim() ?? '';
+    if (query.isNotEmpty) {
+      list = list
+          .where((p) => _matchesSearch(p, query, searchField))
+          .toList(growable: false);
     }
 
-    sorted.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    list.sort(_compareLatest);
 
-    final start = cursor == null
-        ? 0
-        : max(0, sorted.indexWhere((p) => p.id == cursor) + 1);
+    final safeLimit = limit <= 0 ? 20 : limit;
 
-    final items = sorted.skip(start).take(limit).toList();
-    final nextCursor = items.length == limit ? items.last.id : null;
+    var startIndex = 0;
+    final safeCursor = cursor?.trim();
+
+    if (safeCursor != null && safeCursor.isNotEmpty) {
+      final cursorIndex = list.indexWhere((p) => p.id == safeCursor);
+      if (cursorIndex >= 0) {
+        startIndex = cursorIndex + 1;
+      }
+    }
+
+    final endIndex = min(startIndex + safeLimit, list.length);
+
+    final items = startIndex >= list.length
+        ? <Post>[]
+        : list.sublist(startIndex, endIndex);
+
+    final nextCursor =
+        endIndex < list.length && items.isNotEmpty ? items.last.id : null;
 
     return PostPage(
       items: items,
@@ -270,174 +521,31 @@ class InMemoryPostRepository implements PostRepository {
   }
 
   @override
-  Future<Post> createPost({
-    required String authorId,
-    required String authorLabel,
-    required bool isOwnerVerified,
-    required String title,
-    required String body,
-    required BoardType boardType,
-    UsedPostType? usedType,
-    String? industryId,
-    String? locationLabel,
-    List<String>? imagePaths,
-  }) async {
-    await _ensureLoaded();
-
-    final post = Post(
-      id: _id(),
-      authorId: authorId,
-      authorLabel: authorLabel,
-      isOwnerVerified: isOwnerVerified,
-      title: title,
-      body: body,
-      boardType: boardType,
-      usedType: boardType == BoardType.used ? usedType : null,
-      isSold: false,
-      createdAt: DateTime.now(),
-      imagePaths: imagePaths ?? const [],
-      industryId: industryId,
-      locationLabel: locationLabel,
-    );
-
-    _posts.insert(0, post);
-    _commentsByPostId[post.id] = <Comment>[];
-
-    await _saveToDisk();
-    return post;
-  }
-
-  @override
-  Future<Post> updatePost({
-    required String postId,
-    required String userId,
-    required String title,
-    required String body,
-    UsedPostType? usedType,
-    List<String>? imagePaths,
-  }) async {
-    await _ensureLoaded();
-
-    final idx = _indexOfPost(postId);
-    if (idx < 0) throw Exception('Post not found');
-
-    final current = _posts[idx];
-    if (current.authorId != userId) {
-      throw Exception('수정 권한이 없습니다.');
-    }
-
-    final updated = current.copyWith(
-      title: title,
-      body: body,
-      usedType: current.boardType == BoardType.used
-          ? (usedType ?? current.usedType)
-          : null,
-      imagePaths: imagePaths ?? current.imagePaths,
-    );
-
-    _posts[idx] = updated;
-    await _saveToDisk();
-    return updated;
-  }
-
-  @override
-  Future<Post> toggleLike({
-    required String postId,
-    required String userId,
-  }) async {
-    await _ensureLoaded();
-
-    final idx = _indexOfPost(postId);
-    if (idx < 0) throw Exception('Post not found');
-
-    final p = _posts[idx];
-    final liked = Set<String>.from(p.likedUserIds);
-
-    if (liked.contains(userId)) {
-      liked.remove(userId);
-    } else {
-      liked.add(userId);
-    }
-
-    final updated = p.copyWith(
-      likedUserIds: liked,
-      likeCount: liked.length,
-    );
-
-    _posts[idx] = updated;
-    await _saveToDisk();
-    return updated;
-  }
-
-  @override
-  Future<Post> toggleSold({
-    required String postId,
-    required String userId,
-  }) async {
-    await _ensureLoaded();
-
-    final idx = _indexOfPost(postId);
-    if (idx < 0) throw Exception('Post not found');
-
-    final current = _posts[idx];
-
-    if (current.authorId != userId) {
-      throw Exception('처리 권한이 없습니다.');
-    }
-
-    if (current.boardType != BoardType.used) {
-      throw Exception('거래 게시글만 처리할 수 있습니다.');
-    }
-
-    final updated = current.copyWith(
-      isSold: !current.isSold,
-    );
-
-    _posts[idx] = updated;
-    await _saveToDisk();
-    return updated;
-  }
-
-  @override
-  Future<void> incrementView(String postId) async {
-    await _ensureLoaded();
-
-    final idx = _indexOfPost(postId);
-    if (idx < 0) return;
-
-    final current = _posts[idx];
-    _posts[idx] = current.copyWith(
-      viewCount: current.viewCount + 1,
-    );
-
-    await _saveToDisk();
-  }
-
-  @override
   Future<bool> canDeletePost({
     required String postId,
-    required String userId,
   }) async {
     await _ensureLoaded();
 
     final idx = _indexOfPost(postId);
     if (idx < 0) return false;
 
-    return _posts[idx].authorId == userId;
+    return _posts[idx].authorId == _me;
   }
 
   @override
   Future<void> deletePost({
     required String postId,
-    required String userId,
   }) async {
     await _ensureLoaded();
 
     final idx = _indexOfPost(postId);
-    if (idx < 0) throw Exception('Post not found');
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
 
     final current = _posts[idx];
-    if (current.authorId != userId) {
+
+    if (current.authorId != _me) {
       throw Exception('삭제 권한이 없습니다.');
     }
 
@@ -450,146 +558,181 @@ class InMemoryPostRepository implements PostRepository {
   @override
   Future<void> reportPost({
     required String postId,
-    required String reporterId,
     required String reason,
   }) async {
     await _ensureLoaded();
 
     final idx = _indexOfPost(postId);
-    if (idx < 0) throw Exception('Post not found');
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
 
     final current = _posts[idx];
-    if (current.authorId == reporterId) {
-      throw Exception('본인 게시글은 신고할 수 없습니다.');
+
+    if (current.authorId == _me) {
+      throw Exception('본인 글은 신고할 수 없습니다.');
     }
-    if (current.reportedUserIds.contains(reporterId)) {
+
+    if (current.reportedUserIds.contains(_me)) {
       throw Exception('이미 신고한 게시글입니다.');
     }
+
     if (reason.trim().isEmpty) {
       throw Exception('신고 사유를 선택하세요.');
     }
 
-    final reporters = Set<String>.from(current.reportedUserIds)..add(reporterId);
+    final reporters = Set<String>.from(current.reportedUserIds)..add(_me);
     final nextCount = current.reportCount + 1;
 
-    _posts[idx] = current.copyWith(
+    final updated = current.copyWith(
       reportCount: nextCount,
       reportedUserIds: reporters,
       isReportThresholdReached:
           current.isReportThresholdReached || nextCount >= 3,
     );
 
+    _posts[idx] = updated;
     await _saveToDisk();
   }
 
   @override
   Future<List<Comment>> fetchComments(String postId) async {
     await _ensureLoaded();
-    final list = List<Comment>.from(_commentsByPostId[postId] ?? const <Comment>[])
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    final list = List<Comment>.from(
+      _commentsByPostId[postId] ?? const <Comment>[],
+    )..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
     return list;
   }
 
   @override
   Future<Comment> addComment({
     required String postId,
-    required String authorId,
-    required String authorLabel,
-    bool isOwnerVerified = false,
-    String? industryId,
-    String? locationLabel,
     required String text,
   }) async {
     await _ensureLoaded();
 
+    final idx = _indexOfPost(postId);
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
+
+    final author = await _currentAuthorSnapshot();
     final list = _commentsByPostId.putIfAbsent(postId, () => <Comment>[]);
 
-    final c = Comment(
+    final comment = Comment(
       id: _id(),
       postId: postId,
-      authorId: authorId,
-      authorLabel: authorLabel,
-      isOwnerVerified: isOwnerVerified,
-      industryId: industryId,
-      locationLabel: locationLabel,
+      authorId: author.authorId,
+      authorLabel: author.authorLabel,
+      isOwnerVerified: author.isOwnerVerified,
+      industryId: author.industryId,
+      locationLabel: author.locationLabel,
       text: text,
+      parentId: null,
       createdAt: DateTime.now(),
+      likeCount: 0,
+      likedUserIds: <String>{},
+      reportCount: 0,
+      reportedUserIds: <String>{},
+      isReportThresholdReached: false,
+      isDeleted: false,
     );
 
-    list.add(c);
+    list.add(comment);
     list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
     _syncPostCommentCount(postId);
     await _saveToDisk();
-    return c;
+
+    return comment;
   }
 
   @override
   Future<Comment> addReply({
     required String postId,
     required String parentCommentId,
-    required String authorId,
-    required String authorLabel,
-    bool isOwnerVerified = false,
-    String? industryId,
-    String? locationLabel,
     required String text,
   }) async {
     await _ensureLoaded();
 
+    final idx = _indexOfPost(postId);
+    if (idx < 0) {
+      throw Exception('Post not found');
+    }
+
     final list = _commentsByPostId.putIfAbsent(postId, () => <Comment>[]);
 
-    final c = Comment(
+    final parentExists = list.any((c) => c.id == parentCommentId);
+    if (!parentExists) {
+      throw Exception('Parent comment not found');
+    }
+
+    final author = await _currentAuthorSnapshot();
+
+    final comment = Comment(
       id: _id(),
       postId: postId,
       parentId: parentCommentId,
-      authorId: authorId,
-      authorLabel: authorLabel,
-      isOwnerVerified: isOwnerVerified,
-      industryId: industryId,
-      locationLabel: locationLabel,
+      authorId: author.authorId,
+      authorLabel: author.authorLabel,
+      isOwnerVerified: author.isOwnerVerified,
+      industryId: author.industryId,
+      locationLabel: author.locationLabel,
       text: text,
       createdAt: DateTime.now(),
+      likeCount: 0,
+      likedUserIds: <String>{},
+      reportCount: 0,
+      reportedUserIds: <String>{},
+      isReportThresholdReached: false,
+      isDeleted: false,
     );
 
-    list.add(c);
+    list.add(comment);
     list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
     _syncPostCommentCount(postId);
     await _saveToDisk();
-    return c;
+
+    return comment;
   }
 
   @override
   Future<Comment> toggleCommentLike({
     required String postId,
     required String commentId,
-    required String userId,
   }) async {
     await _ensureLoaded();
 
     final list = _commentsByPostId[postId];
-    if (list == null) throw Exception('Comment not found');
-
-    final idx = list.indexWhere((c) => c.id == commentId);
-    if (idx < 0) throw Exception('Comment not found');
-
-    final c = list[idx];
-    final liked = Set<String>.from(c.likedUserIds);
-
-    if (liked.contains(userId)) {
-      liked.remove(userId);
-    } else {
-      liked.add(userId);
+    if (list == null) {
+      throw Exception('Comment not found');
     }
 
-    final updated = c.copyWith(
+    final idx = list.indexWhere((c) => c.id == commentId);
+    if (idx < 0) {
+      throw Exception('Comment not found');
+    }
+
+    final current = list[idx];
+    final liked = Set<String>.from(current.likedUserIds);
+
+    if (liked.contains(_me)) {
+      liked.remove(_me);
+    } else {
+      liked.add(_me);
+    }
+
+    final updated = current.copyWith(
       likedUserIds: liked,
       likeCount: liked.length,
     );
 
     list[idx] = updated;
     await _saveToDisk();
+
     return updated;
   }
 
@@ -597,7 +740,6 @@ class InMemoryPostRepository implements PostRepository {
   Future<bool> canDeleteComment({
     required String postId,
     required String commentId,
-    required String userId,
   }) async {
     await _ensureLoaded();
 
@@ -607,72 +749,88 @@ class InMemoryPostRepository implements PostRepository {
     final idx = list.indexWhere((c) => c.id == commentId);
     if (idx < 0) return false;
 
-    return list[idx].authorId == userId;
+    return list[idx].authorId == _me;
   }
 
   @override
   Future<void> deleteComment({
     required String postId,
     required String commentId,
-    required String userId,
   }) async {
     await _ensureLoaded();
 
     final list = _commentsByPostId[postId];
-    if (list == null) throw Exception('Comment not found');
+    if (list == null) {
+      throw Exception('Comment not found');
+    }
 
     final idx = list.indexWhere((c) => c.id == commentId);
-    if (idx < 0) throw Exception('Comment not found');
+    if (idx < 0) {
+      throw Exception('Comment not found');
+    }
 
     final current = list[idx];
-    if (current.authorId != userId) {
+
+    if (current.authorId != _me) {
       throw Exception('삭제 권한이 없습니다.');
     }
 
-    if (!current.isDeleted) {
-      list[idx] = current.copyWith(isDeleted: true);
-      _syncPostCommentCount(postId);
-      await _saveToDisk();
-    }
+    if (current.isDeleted) return;
+
+    final updated = current.copyWith(
+      text: '삭제된 댓글입니다.',
+      isDeleted: true,
+    );
+
+    list[idx] = updated;
+
+    _syncPostCommentCount(postId);
+    await _saveToDisk();
   }
 
   @override
   Future<void> reportComment({
     required String postId,
     required String commentId,
-    required String reporterId,
     required String reason,
   }) async {
     await _ensureLoaded();
 
     final list = _commentsByPostId[postId];
-    if (list == null) throw Exception('Comment not found');
+    if (list == null) {
+      throw Exception('Comment not found');
+    }
 
     final idx = list.indexWhere((c) => c.id == commentId);
-    if (idx < 0) throw Exception('Comment not found');
+    if (idx < 0) {
+      throw Exception('Comment not found');
+    }
 
     final current = list[idx];
-    if (current.authorId == reporterId) {
+
+    if (current.authorId == _me) {
       throw Exception('본인 댓글은 신고할 수 없습니다.');
     }
-    if (current.reportedUserIds.contains(reporterId)) {
+
+    if (current.reportedUserIds.contains(_me)) {
       throw Exception('이미 신고한 댓글입니다.');
     }
+
     if (reason.trim().isEmpty) {
       throw Exception('신고 사유를 선택하세요.');
     }
 
-    final reporters = Set<String>.from(current.reportedUserIds)
-      ..add(reporterId);
+    final reporters = Set<String>.from(current.reportedUserIds)..add(_me);
     final nextCount = current.reportCount + 1;
 
-    list[idx] = current.copyWith(
+    final updated = current.copyWith(
       reportCount: nextCount,
       reportedUserIds: reporters,
       isReportThresholdReached:
           current.isReportThresholdReached || nextCount >= 3,
     );
 
+    list[idx] = updated;
     await _saveToDisk();
   }
 
@@ -680,63 +838,88 @@ class InMemoryPostRepository implements PostRepository {
   Future<Comment> updateComment({
     required String postId,
     required String commentId,
-    required String userId,
     required String text,
   }) async {
     await _ensureLoaded();
 
     final list = _commentsByPostId[postId];
-    if (list == null) throw Exception('Comment not found');
+    if (list == null) {
+      throw Exception('Comment not found');
+    }
 
     final idx = list.indexWhere((c) => c.id == commentId);
-    if (idx < 0) throw Exception('Comment not found');
+    if (idx < 0) {
+      throw Exception('Comment not found');
+    }
 
     final current = list[idx];
-    if (current.authorId != userId) {
+
+    if (current.authorId != _me) {
       throw Exception('수정 권한이 없습니다.');
     }
+
     if (current.isDeleted) {
       throw Exception('삭제된 댓글은 수정할 수 없습니다.');
     }
 
     final updated = current.copyWith(
-      text: text.trim(),
+      text: text,
     );
 
     list[idx] = updated;
     await _saveToDisk();
+
     return updated;
   }
 
   @override
-  Future<List<Post>> fetchMyPosts(String userId) async {
+  Future<List<Post>> fetchMyPosts() async {
     await _ensureLoaded();
 
-    final normalized = userId.trim();
-    if (normalized.isEmpty) return <Post>[];
-
-    final list = _posts
-        .where((p) => p.authorId == normalized)
-        .toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final list = _posts.where((p) => p.authorId == _me).toList()
+      ..sort(_compareLatest);
 
     return list;
   }
 
   @override
-  Future<List<Comment>> fetchMyComments(String userId) async {
+  Future<List<Comment>> fetchMyComments() async {
     await _ensureLoaded();
 
-    final normalized = userId.trim();
-    if (normalized.isEmpty) return <Comment>[];
+    final list = <Comment>[];
 
-    final allComments = _commentsByPostId.values.expand((e) => e);
+    for (final comments in _commentsByPostId.values) {
+      list.addAll(comments.where((c) => c.authorId == _me));
+    }
 
-    final list = allComments
-        .where((c) => c.authorId == normalized && !c.isDeleted)
-        .toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
     return list;
+  }
+}
+
+class _LocalAuthorSnapshot {
+  final String authorId;
+  final String authorLabel;
+  final bool isOwnerVerified;
+  final String? industryId;
+  final String? locationLabel;
+
+  const _LocalAuthorSnapshot({
+    required this.authorId,
+    required this.authorLabel,
+    required this.isOwnerVerified,
+    required this.industryId,
+    required this.locationLabel,
+  });
+
+  factory _LocalAuthorSnapshot.fallback(String userId) {
+    return _LocalAuthorSnapshot(
+      authorId: userId,
+      authorLabel: '익명',
+      isOwnerVerified: false,
+      industryId: null,
+      locationLabel: null,
+    );
   }
 }

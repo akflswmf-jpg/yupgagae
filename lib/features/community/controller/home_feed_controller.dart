@@ -62,6 +62,7 @@ class HomeFeedController extends GetxController {
 
   Future<void> loadAll() async {
     error.value = null;
+
     await Future.wait([
       refreshOwnerVerification(),
       loadTop(),
@@ -81,12 +82,13 @@ class HomeFeedController extends GetxController {
   }
 
   Future<void> loadTop() async {
+    if (isLoadingTop.value) return;
+
     isLoadingTop.value = true;
     error.value = null;
 
     try {
       final allPosts = await repo.fetchHomeTopPosts(limit: 100);
-
       final recentPosts = _filterRecentPosts(allPosts);
 
       final recentFreePosts =
@@ -98,8 +100,8 @@ class HomeFeedController extends GetxController {
       final hotList = List<Post>.from(recentFreePosts)..sort(_compareHotPosts);
       final mostCommentedList = List<Post>.from(recentFreePosts)
         ..sort(_compareMostCommentedPosts);
-      final ownerHotList =
-          List<Post>.from(recentOwnerPosts)..sort(_compareHotPosts);
+      final ownerHotList = List<Post>.from(recentOwnerPosts)
+        ..sort(_compareHotPosts);
 
       hot.assignAll(_dedupeById(hotList.take(topLimit).toList()));
       mostCommented.assignAll(
@@ -112,48 +114,45 @@ class HomeFeedController extends GetxController {
         recentFreePosts: recentFreePosts,
         recentOwnerPosts: recentOwnerPosts,
       );
-    } catch (e, s) {
+    } catch (e) {
       error.value = e.toString();
-      debugPrint('HOME loadTop error: $e\n$s');
     } finally {
       isLoadingTop.value = false;
     }
   }
 
   Future<void> refreshLatest() async {
+    if (isLoadingLatest.value) return;
+
     isLoadingLatest.value = true;
     error.value = null;
 
     try {
-      _cursor = null;
-      hasMore.value = true;
-
-      final PostPage page = await repo.fetchLatestPage(
-        cursor: _cursor,
+      final page = await repo.fetchLatestPage(
+        cursor: null,
         limit: latestLimit,
+        boardType: BoardType.free,
       );
 
       latest.assignAll(_dedupeById(page.items));
       _cursor = page.nextCursor;
       hasMore.value = page.nextCursor != null;
-    } catch (e, s) {
+    } catch (e) {
       error.value = e.toString();
-      debugPrint('HOME refreshLatest error: $e\n$s');
     } finally {
       isLoadingLatest.value = false;
     }
   }
 
   Future<void> refreshUsedLatest() async {
+    if (isLoadingUsedLatest.value) return;
+
     isLoadingUsedLatest.value = true;
     error.value = null;
 
     try {
-      _usedCursor = null;
-      hasMoreUsed.value = true;
-
-      final PostPage page = await repo.fetchLatestPage(
-        cursor: _usedCursor,
+      final page = await repo.fetchLatestPage(
+        cursor: null,
         limit: latestLimit,
         boardType: BoardType.used,
       );
@@ -161,24 +160,22 @@ class HomeFeedController extends GetxController {
       usedLatest.assignAll(_dedupeById(page.items));
       _usedCursor = page.nextCursor;
       hasMoreUsed.value = page.nextCursor != null;
-    } catch (e, s) {
+    } catch (e) {
       error.value = e.toString();
-      debugPrint('HOME refreshUsedLatest error: $e\n$s');
     } finally {
       isLoadingUsedLatest.value = false;
     }
   }
 
   Future<void> refreshOwnerLatest() async {
+    if (isLoadingOwnerLatest.value) return;
+
     isLoadingOwnerLatest.value = true;
     error.value = null;
 
     try {
-      _ownerCursor = null;
-      hasMoreOwner.value = true;
-
-      final PostPage page = await repo.fetchLatestPage(
-        cursor: _ownerCursor,
+      final page = await repo.fetchLatestPage(
+        cursor: null,
         limit: latestLimit,
         boardType: BoardType.owner,
       );
@@ -186,103 +183,86 @@ class HomeFeedController extends GetxController {
       ownerLatest.assignAll(_dedupeById(page.items));
       _ownerCursor = page.nextCursor;
       hasMoreOwner.value = page.nextCursor != null;
-    } catch (e, s) {
+    } catch (e) {
       error.value = e.toString();
-      debugPrint('HOME refreshOwnerLatest error: $e\n$s');
     } finally {
       isLoadingOwnerLatest.value = false;
     }
   }
 
   Future<void> loadMoreLatest() async {
-    if (!hasMore.value || isLoadingLatest.value || isLoadingMore.value) return;
+    if (isLoadingMore.value || !hasMore.value) return;
 
     isLoadingMore.value = true;
+    error.value = null;
 
     try {
-      final PostPage page = await repo.fetchLatestPage(
+      final page = await repo.fetchLatestPage(
         cursor: _cursor,
         limit: latestLimit,
+        boardType: BoardType.free,
       );
 
-      if (page.items.isNotEmpty) {
-        final merged = <Post>[
-          ...latest,
-          ...page.items,
-        ];
-        latest.assignAll(_dedupeById(merged));
-      }
-
-      _cursor = page.nextCursor;
-      hasMore.value = page.nextCursor != null;
-    } catch (e, s) {
-      debugPrint('HOME loadMoreLatest error: $e\n$s');
+      _appendPage(
+        target: latest,
+        page: page,
+        setCursor: (cursor) => _cursor = cursor,
+        setHasMore: (value) => hasMore.value = value,
+      );
+    } catch (e) {
+      error.value = e.toString();
     } finally {
       isLoadingMore.value = false;
     }
   }
 
   Future<void> loadMoreUsedLatest() async {
-    if (!hasMoreUsed.value ||
-        isLoadingUsedLatest.value ||
-        isLoadingMoreUsed.value) {
-      return;
-    }
+    if (isLoadingMoreUsed.value || !hasMoreUsed.value) return;
 
     isLoadingMoreUsed.value = true;
+    error.value = null;
 
     try {
-      final PostPage page = await repo.fetchLatestPage(
+      final page = await repo.fetchLatestPage(
         cursor: _usedCursor,
         limit: latestLimit,
         boardType: BoardType.used,
       );
 
-      if (page.items.isNotEmpty) {
-        final merged = <Post>[
-          ...usedLatest,
-          ...page.items,
-        ];
-        usedLatest.assignAll(_dedupeById(merged));
-      }
-
-      _usedCursor = page.nextCursor;
-      hasMoreUsed.value = page.nextCursor != null;
-    } catch (e, s) {
-      debugPrint('HOME loadMoreUsedLatest error: $e\n$s');
+      _appendPage(
+        target: usedLatest,
+        page: page,
+        setCursor: (cursor) => _usedCursor = cursor,
+        setHasMore: (value) => hasMoreUsed.value = value,
+      );
+    } catch (e) {
+      error.value = e.toString();
     } finally {
       isLoadingMoreUsed.value = false;
     }
   }
 
   Future<void> loadMoreOwnerLatest() async {
-    if (!hasMoreOwner.value ||
-        isLoadingOwnerLatest.value ||
-        isLoadingMoreOwner.value) {
-      return;
-    }
+    if (isLoadingMoreOwner.value || !hasMoreOwner.value) return;
 
     isLoadingMoreOwner.value = true;
+    error.value = null;
 
     try {
-      final PostPage page = await repo.fetchLatestPage(
+      final page = await repo.fetchLatestPage(
         cursor: _ownerCursor,
         limit: latestLimit,
         boardType: BoardType.owner,
       );
 
-      if (page.items.isNotEmpty) {
-        final merged = <Post>[
-          ...ownerLatest,
-          ...page.items,
-        ];
-        ownerLatest.assignAll(_dedupeById(merged));
-      }
-
-      _ownerCursor = page.nextCursor;
-      hasMoreOwner.value = page.nextCursor != null;
-    } catch (e, s) {
-      debugPrint('HOME loadMoreOwnerLatest error: $e\n$s');
+      _appendPage(
+        target: ownerLatest,
+        page: page,
+        setCursor: (cursor) => _ownerCursor = cursor,
+        setHasMore: (value) => hasMoreOwner.value = value,
+      );
+    } catch (e) {
+      error.value = e.toString();
     } finally {
       isLoadingMoreOwner.value = false;
     }
@@ -292,82 +272,66 @@ class HomeFeedController extends GetxController {
     try {
       final updated = await repo.toggleLike(
         postId: post.id,
-        userId: currentUserId,
       );
 
-      applyPost(updated);
-    } catch (e, s) {
-      debugPrint('HOME toggleLike error: $e\n$s');
+      _replacePost(latest, updated);
+      _replacePost(usedLatest, updated);
+      _replacePost(ownerLatest, updated);
+      _replacePost(hot, updated);
+      _replacePost(mostCommented, updated);
+      _replacePost(ownerHot, updated);
+
+      _resortTopLists();
+    } catch (e) {
+      error.value = e.toString();
     }
-  }
-
-  void applyPost(Post updated) {
-    _replacePostInList(latest, updated);
-    _replacePostInList(usedLatest, updated);
-    _replacePostInList(ownerLatest, updated);
-    _replacePostInList(hot, updated);
-    _replacePostInList(mostCommented, updated);
-    _replacePostInList(ownerHot, updated);
-
-    _resortTopLists();
-  }
-
-  void removePost(String postId) {
-    latest.removeWhere((p) => p.id == postId);
-    usedLatest.removeWhere((p) => p.id == postId);
-    ownerLatest.removeWhere((p) => p.id == postId);
-    hot.removeWhere((p) => p.id == postId);
-    mostCommented.removeWhere((p) => p.id == postId);
-    ownerHot.removeWhere((p) => p.id == postId);
   }
 
   List<Post> _filterRecentPosts(List<Post> posts) {
     final now = DateTime.now();
-
     return posts.where((post) {
       final diff = now.difference(post.createdAt);
-      return diff.inHours >= 0 && diff.inHours < _topWindowHours;
+      return diff.inHours <= _topWindowHours;
     }).toList();
   }
 
   int _compareHotPosts(Post a, Post b) {
-    final scoreB = _hotScore(b);
-    final scoreA = _hotScore(a);
+    final aScore =
+        (a.likeCount * _hotLikeWeight) + (a.commentCount * _hotCommentWeight);
+    final bScore =
+        (b.likeCount * _hotLikeWeight) + (b.commentCount * _hotCommentWeight);
 
-    if (scoreB != scoreA) return scoreB.compareTo(scoreA);
-    if (b.likeCount != a.likeCount) return b.likeCount.compareTo(a.likeCount);
-    if (b.commentCount != a.commentCount) {
-      return b.commentCount.compareTo(a.commentCount);
-    }
+    final scoreCompare = bScore.compareTo(aScore);
+    if (scoreCompare != 0) return scoreCompare;
+
     return b.createdAt.compareTo(a.createdAt);
   }
 
   int _compareMostCommentedPosts(Post a, Post b) {
-    if (b.commentCount != a.commentCount) {
-      return b.commentCount.compareTo(a.commentCount);
-    }
-    if (b.likeCount != a.likeCount) return b.likeCount.compareTo(a.likeCount);
+    final commentCompare = b.commentCount.compareTo(a.commentCount);
+    if (commentCompare != 0) return commentCompare;
+
     return b.createdAt.compareTo(a.createdAt);
   }
 
-  int _hotScore(Post post) {
-    final baseScore =
-        (post.likeCount * _hotLikeWeight) +
-        (post.commentCount * _hotCommentWeight);
+  void _appendPage({
+    required RxList<Post> target,
+    required PostPage page,
+    required void Function(String? cursor) setCursor,
+    required void Function(bool hasMore) setHasMore,
+  }) {
+    final merged = <Post>[
+      ...target,
+      ...page.items,
+    ];
 
-    final age = _ageHours(post.createdAt);
-    final penalty = (age / 3).floor();
-
-    return (baseScore - penalty).clamp(0, 99999).toInt();
+    target.assignAll(_dedupeById(merged));
+    setCursor(page.nextCursor);
+    setHasMore(page.nextCursor != null);
   }
 
-  int _ageHours(DateTime createdAt) {
-    final diff = DateTime.now().difference(createdAt);
-    return diff.isNegative ? 0 : diff.inHours;
-  }
-
-  void _replacePostInList(RxList<Post> list, Post updated) {
-    final index = list.indexWhere((item) => item.id == updated.id);
+  void _replacePost(RxList<Post> list, Post updated) {
+    final index = list.indexWhere((p) => p.id == updated.id);
     if (index != -1) {
       list[index] = updated;
     }

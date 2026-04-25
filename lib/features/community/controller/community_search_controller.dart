@@ -27,51 +27,77 @@ class CommunitySearchController extends GetxController {
   final searchFieldKey = 'all'.obs;
 
   final results = <Post>[].obs;
-  final isLoading = false.obs;
-  final error = RxnString();
-
-  final searchedOnce = false.obs;
   final recentKeywords = <String>[].obs;
+
+  final isLoading = false.obs;
+  final searchedOnce = false.obs;
+  final error = RxnString();
 
   Timer? _debounce;
 
   String get currentUserId => session.anonId;
 
-  List<String> get defaultSuggestions => const [
-        '배달',
-        '매출',
-        '알바',
-        '사장님',
-        '광고',
-        '단골',
-        '진상',
-        '소통',
-        '오픈',
-        '폐업',
-      ];
+  bool get hasQuery => query.value.trim().isNotEmpty;
+
+  bool get isIdle {
+    return !isLoading.value &&
+        !searchedOnce.value &&
+        query.value.trim().isEmpty &&
+        results.isEmpty;
+  }
 
   bool get isQueryTooShort {
     final q = query.value.trim();
     return q.isNotEmpty && q.length < 2;
   }
 
-  bool get isIdle {
-    return query.value.trim().isEmpty;
+  List<String> get defaultSuggestions {
+    if (boardType == BoardType.owner) {
+      return const [
+        '매출',
+        '알바',
+        '배달',
+        '세금',
+        '진상',
+        '권리금',
+        '상권',
+        '인테리어',
+      ];
+    }
+
+    if (boardType == BoardType.used) {
+      return const [
+        '가게양도',
+        '중고거래',
+        '냉장고',
+        '커피머신',
+        '집기',
+        '권리금',
+        '양도',
+        '폐업',
+      ];
+    }
+
+    return const [
+      '매출',
+      '알바',
+      '배달',
+      '상권',
+      '세금',
+      '진상',
+      '창업',
+      '폐업',
+    ];
   }
 
   @override
   void onInit() {
     super.onInit();
+    loadRecentKeywords();
 
-    ever<PostSearchField>(searchField, (f) {
-      searchFieldKey.value = _toKey(f);
+    ever<PostSearchField>(searchField, (field) {
+      searchFieldKey.value = _toKey(field);
     });
-  }
-
-  @override
-  void onReady() {
-    super.onReady();
-    _loadHistory();
   }
 
   @override
@@ -80,7 +106,7 @@ class CommunitySearchController extends GetxController {
     super.onClose();
   }
 
-  Future<void> _loadHistory() async {
+  Future<void> loadRecentKeywords() async {
     try {
       final list = await historyService.getHistory();
       recentKeywords.assignAll(list);
@@ -89,42 +115,47 @@ class CommunitySearchController extends GetxController {
     }
   }
 
-  void setQuery(String value) {
-    query.value = value;
+  Future<void> rememberCurrentQuery() async {
+    final q = query.value.trim();
+    if (q.isEmpty) return;
 
+    await _saveRecentKeyword(q);
+  }
+
+  void setQuery(String value) {
     final q = value.trim();
+
+    query.value = q;
     error.value = null;
+
+    _debounce?.cancel();
 
     if (q.isEmpty) {
       results.clear();
       searchedOnce.value = false;
-      _debounce?.cancel();
       return;
     }
 
     if (q.length < 2) {
       results.clear();
       searchedOnce.value = false;
-      _debounce?.cancel();
       return;
     }
 
-    _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 250), () async {
-      await _runSearchOnly();
+    _debounce = Timer(const Duration(milliseconds: 250), () {
+      _runSearchOnly();
     });
   }
 
-  Future<void> submitQuery([String? value]) async {
-    if (value != null) {
-      query.value = value;
-    }
+  Future<void> submitQuery(String value) async {
+    await submitSearch(value);
+  }
 
-    final q = query.value.trim();
-    if (q.isEmpty) {
-      clearQuery();
-      return;
-    }
+  Future<void> submitSearch(String value) async {
+    final q = value.trim();
+
+    _debounce?.cancel();
+    query.value = q;
 
     if (q.length < 2) {
       results.clear();
@@ -136,27 +167,35 @@ class CommunitySearchController extends GetxController {
     await _runSearchOnly();
   }
 
-  Future<void> rememberCurrentQuery() async {
+  Future<void> searchNow() async {
     final q = query.value.trim();
-    if (q.length < 2) return;
-    await _saveRecentKeyword(q);
-  }
 
-  Future<void> refreshSearch() async {
-    final q = query.value.trim();
-    if (q.length < 2) return;
+    _debounce?.cancel();
+
+    if (q.length < 2) {
+      results.clear();
+      searchedOnce.value = false;
+      return;
+    }
+
+    await _saveRecentKeyword(q);
     await _runSearchOnly();
   }
 
-  Future<void> changeSearchField(String key) async {
-    final next = _fromKey(key);
-    searchField.value = next;
-    searchFieldKey.value = key;
+  Future<void> changeSearchField(dynamic field) async {
+    final resolved = _fieldFromDynamic(field);
+
+    searchField.value = resolved;
+    searchFieldKey.value = _toKey(resolved);
 
     final q = query.value.trim();
     if (q.length >= 2) {
       await _runSearchOnly();
     }
+  }
+
+  Future<void> setSearchFieldByKey(String key) async {
+    await changeSearchField(key);
   }
 
   Future<void> tapRecentKeyword(String keyword) async {
@@ -179,6 +218,7 @@ class CommunitySearchController extends GetxController {
 
   Future<void> removeRecentKeyword(String keyword) async {
     recentKeywords.remove(keyword);
+
     try {
       await historyService.removeKeyword(keyword);
       final list = await historyService.getHistory();
@@ -188,6 +228,7 @@ class CommunitySearchController extends GetxController {
 
   Future<void> clearAllRecentKeywords() async {
     recentKeywords.clear();
+
     try {
       await historyService.clearAll();
       recentKeywords.clear();
@@ -196,10 +237,23 @@ class CommunitySearchController extends GetxController {
 
   void clearQuery() {
     _debounce?.cancel();
+
     query.value = '';
     results.clear();
     error.value = null;
     searchedOnce.value = false;
+  }
+
+  Future<void> refreshSearch() async {
+    final q = query.value.trim();
+
+    if (q.length < 2) {
+      results.clear();
+      searchedOnce.value = false;
+      return;
+    }
+
+    await _runSearchOnly();
   }
 
   Future<void> _saveRecentKeyword(String keyword) async {
@@ -230,7 +284,7 @@ class CommunitySearchController extends GetxController {
         searchField: searchField.value,
       );
 
-      results.value = page.items;
+      results.assignAll(page.items);
       searchedOnce.value = true;
     } catch (e) {
       error.value = e.toString();
@@ -245,15 +299,12 @@ class CommunitySearchController extends GetxController {
     try {
       final updated = await repo.toggleLike(
         postId: post.id,
-        userId: currentUserId,
       );
 
       final idx = results.indexWhere((e) => e.id == post.id);
       if (idx == -1) return;
 
-      final next = List<Post>.from(results);
-      next[idx] = updated;
-      results.value = next;
+      results[idx] = updated;
     } catch (e) {
       error.value = e.toString();
     }
@@ -280,5 +331,17 @@ class CommunitySearchController extends GetxController {
       default:
         return PostSearchField.all;
     }
+  }
+
+  PostSearchField _fieldFromDynamic(dynamic value) {
+    if (value is PostSearchField) {
+      return value;
+    }
+
+    if (value is String) {
+      return _fromKey(value);
+    }
+
+    return PostSearchField.all;
   }
 }

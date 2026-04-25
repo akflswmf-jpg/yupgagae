@@ -177,13 +177,13 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     _dismissKeyboardForSubmit();
 
     try {
-      final localId = await commentC.add(text);
+      final createdComment = await commentC.add(text);
 
       c.applyUpdatedCommentCount(commentC.activeCommentCount);
 
       if (!mounted) return;
 
-      if (localId != null && localId.isNotEmpty) {
+      if (createdComment.id.trim().isNotEmpty) {
         unawaited(_scrollToBottomAfterCommentInsert());
       } else {
         WidgetsBinding.instance.addPostFrameCallback((_) {

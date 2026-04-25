@@ -393,16 +393,10 @@ class WritePostController extends GetxController {
           return false;
         }
 
-        final authorLabel =
-            profile.nickname.trim().isEmpty ? '익명' : profile.nickname.trim();
-
         final industryId = _industryIdFromProfile(profile);
         final regionLabel = RegionCatalog.normalize(profile.region);
 
         await repo.createPost(
-          authorId: currentUserId,
-          authorLabel: authorLabel,
-          isOwnerVerified: profile.isOwnerVerified,
           title: resolvedTitle,
           body: resolvedBody,
           boardType: _resolvedBoardType,
@@ -416,7 +410,6 @@ class WritePostController extends GetxController {
       } else {
         await repo.updatePost(
           postId: editingPostId!,
-          userId: currentUserId,
           title: resolvedTitle,
           body: resolvedBody,
           usedType: _resolvedBoardType == BoardType.used

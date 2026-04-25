@@ -25,11 +25,6 @@ class OwnerBoardController extends PostListController {
 
   bool _prewarmStarted = false;
 
-  @override
-  void onInit() {
-    super.onInit();
-  }
-
   Future<void> prewarm() async {
     if (_prewarmStarted) return;
     _prewarmStarted = true;
