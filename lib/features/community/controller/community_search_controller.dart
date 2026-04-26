@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_page.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
@@ -10,13 +10,13 @@ import 'package:yupgagae/features/community/service/search_history_service.dart'
 
 class CommunitySearchController extends GetxController {
   final PostRepository repo;
-  final AnonSessionService session;
+  final AuthSessionService auth;
   final SearchHistoryService historyService;
   final BoardType boardType;
 
   CommunitySearchController({
     required this.repo,
-    required this.session,
+    required this.auth,
     required this.historyService,
     this.boardType = BoardType.free,
   });
@@ -35,7 +35,9 @@ class CommunitySearchController extends GetxController {
 
   Timer? _debounce;
 
-  String get currentUserId => session.anonId;
+  int _searchGeneration = 0;
+
+  String get currentUserId => auth.currentUserId;
 
   bool get hasQuery => query.value.trim().isNotEmpty;
 
@@ -103,6 +105,7 @@ class CommunitySearchController extends GetxController {
   @override
   void onClose() {
     _debounce?.cancel();
+    _searchGeneration++;
     super.onClose();
   }
 
@@ -131,19 +134,23 @@ class CommunitySearchController extends GetxController {
     _debounce?.cancel();
 
     if (q.isEmpty) {
+      _invalidateSearch();
       results.clear();
       searchedOnce.value = false;
+      isLoading.value = false;
       return;
     }
 
     if (q.length < 2) {
+      _invalidateSearch();
       results.clear();
       searchedOnce.value = false;
+      isLoading.value = false;
       return;
     }
 
     _debounce = Timer(const Duration(milliseconds: 250), () {
-      _runSearchOnly();
+      unawaited(_runSearchOnly());
     });
   }
 
@@ -156,10 +163,13 @@ class CommunitySearchController extends GetxController {
 
     _debounce?.cancel();
     query.value = q;
+    error.value = null;
 
     if (q.length < 2) {
+      _invalidateSearch();
       results.clear();
       searchedOnce.value = false;
+      isLoading.value = false;
       return;
     }
 
@@ -171,10 +181,13 @@ class CommunitySearchController extends GetxController {
     final q = query.value.trim();
 
     _debounce?.cancel();
+    error.value = null;
 
     if (q.length < 2) {
+      _invalidateSearch();
       results.clear();
       searchedOnce.value = false;
+      isLoading.value = false;
       return;
     }
 
@@ -184,6 +197,8 @@ class CommunitySearchController extends GetxController {
 
   Future<void> changeSearchField(dynamic field) async {
     final resolved = _fieldFromDynamic(field);
+
+    if (searchField.value == resolved) return;
 
     searchField.value = resolved;
     searchFieldKey.value = _toKey(resolved);
@@ -202,7 +217,11 @@ class CommunitySearchController extends GetxController {
     final q = keyword.trim();
     if (q.isEmpty) return;
 
+    _debounce?.cancel();
+
     query.value = q;
+    error.value = null;
+
     await _saveRecentKeyword(q);
     await _runSearchOnly();
   }
@@ -211,7 +230,11 @@ class CommunitySearchController extends GetxController {
     final q = keyword.trim();
     if (q.isEmpty) return;
 
+    _debounce?.cancel();
+
     query.value = q;
+    error.value = null;
+
     await _saveRecentKeyword(q);
     await _runSearchOnly();
   }
@@ -237,19 +260,23 @@ class CommunitySearchController extends GetxController {
 
   void clearQuery() {
     _debounce?.cancel();
+    _invalidateSearch();
 
     query.value = '';
     results.clear();
     error.value = null;
     searchedOnce.value = false;
+    isLoading.value = false;
   }
 
   Future<void> refreshSearch() async {
     final q = query.value.trim();
 
     if (q.length < 2) {
+      _invalidateSearch();
       results.clear();
       searchedOnce.value = false;
+      isLoading.value = false;
       return;
     }
 
@@ -271,6 +298,9 @@ class CommunitySearchController extends GetxController {
     final q = query.value.trim();
     if (q.length < 2) return;
 
+    final field = searchField.value;
+    final generation = ++_searchGeneration;
+
     isLoading.value = true;
     error.value = null;
 
@@ -281,33 +311,81 @@ class CommunitySearchController extends GetxController {
         searchQuery: q,
         boardType: boardType,
         industryId: null,
-        searchField: searchField.value,
+        searchField: field,
       );
 
-      results.assignAll(page.items);
+      if (!_isCurrentSearch(
+        generation: generation,
+        queryText: q,
+        field: field,
+      )) {
+        return;
+      }
+
+      results.assignAll(_dedupeById(page.items));
       searchedOnce.value = true;
     } catch (e) {
+      if (!_isCurrentSearch(
+        generation: generation,
+        queryText: q,
+        field: field,
+      )) {
+        return;
+      }
+
       error.value = e.toString();
       results.clear();
       searchedOnce.value = true;
     } finally {
-      isLoading.value = false;
+      if (_searchGeneration == generation) {
+        isLoading.value = false;
+      }
     }
   }
 
   Future<void> toggleLike(Post post) async {
+    final index = results.indexWhere((e) => e.id == post.id);
+    if (index == -1) return;
+
     try {
       final updated = await repo.toggleLike(
         postId: post.id,
       );
 
-      final idx = results.indexWhere((e) => e.id == post.id);
-      if (idx == -1) return;
+      final currentIndex = results.indexWhere((e) => e.id == updated.id);
+      if (currentIndex == -1) return;
 
-      results[idx] = updated;
+      results[currentIndex] = updated;
     } catch (e) {
       error.value = e.toString();
     }
+  }
+
+  List<Post> _dedupeById(List<Post> items) {
+    final seen = <String>{};
+    final result = <Post>[];
+
+    for (final item in items) {
+      if (seen.add(item.id)) {
+        result.add(item);
+      }
+    }
+
+    return result;
+  }
+
+  void _invalidateSearch() {
+    _searchGeneration++;
+  }
+
+  bool _isCurrentSearch({
+    required int generation,
+    required String queryText,
+    required PostSearchField field,
+  }) {
+    return _searchGeneration == generation &&
+        query.value.trim() == queryText &&
+        searchField.value == field;
   }
 
   String _toKey(PostSearchField f) {

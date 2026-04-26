@@ -1,6 +1,6 @@
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/domain/comment.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
@@ -12,20 +12,20 @@ import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart'
 class MyStoreController extends GetxController {
   final StoreProfileRepository repo;
   final PostRepository postRepo;
-  final AnonSessionService session;
+  final AuthSessionService auth;
 
   MyStoreController({
     required this.repo,
-    PostRepository? postRepo,
-    AnonSessionService? session,
-  })  : postRepo = postRepo ?? Get.find<PostRepository>(),
-        session = session ?? Get.find<AnonSessionService>();
+    required this.postRepo,
+    required this.auth,
+  });
 
   final isLoading = false.obs;
   final isSavingNickname = false.obs;
   final isSavingNotification = false.obs;
   final isSavingIndustry = false.obs;
   final isSavingRegion = false.obs;
+  final isSavingVerification = false.obs;
 
   final isLoadingMyPosts = false.obs;
   final isLoadingMyComments = false.obs;
@@ -41,18 +41,29 @@ class MyStoreController extends GetxController {
   final myPosts = <Post>[].obs;
   final myComments = <Comment>[].obs;
 
-  String get currentUserId => session.anonId;
+  bool _didLoadMyPosts = false;
+  bool _didLoadMyComments = false;
+
+  String get currentUserId => auth.currentUserId;
 
   int get unreadNotificationCount {
     return notifications.where((e) => !e.isRead).length;
   }
 
+  bool get isIdentityVerified {
+    return profile.value?.isIdentityVerified ?? false;
+  }
+
+  bool get isOwnerVerified {
+    return profile.value?.isOwnerVerified ?? false;
+  }
+
   bool get hasLoadedMyPosts {
-    return myPosts.isNotEmpty || isLoadingMyPosts.value == false;
+    return _didLoadMyPosts;
   }
 
   bool get hasLoadedMyComments {
-    return myComments.isNotEmpty || isLoadingMyComments.value == false;
+    return _didLoadMyComments;
   }
 
   @override
@@ -62,6 +73,8 @@ class MyStoreController extends GetxController {
   }
 
   Future<void> load() async {
+    if (isLoading.value) return;
+
     try {
       isLoading.value = true;
       error.value = null;
@@ -75,9 +88,13 @@ class MyStoreController extends GetxController {
     }
   }
 
+  Future<void> refreshProfile() async {
+    await load();
+  }
+
   Future<void> loadMyPosts({bool force = false}) async {
     if (isLoadingMyPosts.value) return;
-    if (!force && myPosts.isNotEmpty) return;
+    if (!force && _didLoadMyPosts) return;
 
     try {
       isLoadingMyPosts.value = true;
@@ -85,6 +102,7 @@ class MyStoreController extends GetxController {
 
       final result = await postRepo.fetchMyPosts();
       myPosts.assignAll(result);
+      _didLoadMyPosts = true;
     } catch (e) {
       myActivityError.value = e.toString();
     } finally {
@@ -94,7 +112,7 @@ class MyStoreController extends GetxController {
 
   Future<void> loadMyComments({bool force = false}) async {
     if (isLoadingMyComments.value) return;
-    if (!force && myComments.isNotEmpty) return;
+    if (!force && _didLoadMyComments) return;
 
     try {
       isLoadingMyComments.value = true;
@@ -102,6 +120,7 @@ class MyStoreController extends GetxController {
 
       final result = await postRepo.fetchMyComments();
       myComments.assignAll(result);
+      _didLoadMyComments = true;
     } catch (e) {
       myActivityError.value = e.toString();
     } finally {
@@ -191,6 +210,68 @@ class MyStoreController extends GetxController {
     await setNotificationsEnabled(enabled);
   }
 
+  Future<void> setIdentityVerifiedForDev(bool verified) async {
+    if (isSavingVerification.value) return;
+
+    try {
+      isSavingVerification.value = true;
+      error.value = null;
+
+      final updated = await repo.updateIdentityVerified(verified);
+      _applyProfile(updated);
+    } finally {
+      isSavingVerification.value = false;
+    }
+  }
+
+  Future<void> setOwnerVerifiedForDev(bool verified) async {
+    if (isSavingVerification.value) return;
+
+    try {
+      isSavingVerification.value = true;
+      error.value = null;
+
+      final updated = await repo.updateOwnerVerified(verified);
+      _applyProfile(updated);
+    } finally {
+      isSavingVerification.value = false;
+    }
+  }
+
+  Future<void> verifyIdentityForDev() async {
+    await setIdentityVerifiedForDev(true);
+  }
+
+  Future<void> clearIdentityVerificationForDev() async {
+    await setIdentityVerifiedForDev(false);
+  }
+
+  Future<void> verifyOwnerForDev() async {
+    if (!isIdentityVerified) {
+      await setIdentityVerifiedForDev(true);
+    }
+
+    await setOwnerVerifiedForDev(true);
+  }
+
+  Future<void> clearOwnerVerificationForDev() async {
+    await setOwnerVerifiedForDev(false);
+  }
+
+  Future<void> clearAllVerificationForDev() async {
+    if (isSavingVerification.value) return;
+
+    try {
+      isSavingVerification.value = true;
+      error.value = null;
+
+      final identityCleared = await repo.updateIdentityVerified(false);
+      _applyProfile(identityCleared);
+    } finally {
+      isSavingVerification.value = false;
+    }
+  }
+
   Future<void> markNotificationRead(String notificationId) async {
     final id = notificationId.trim();
     if (id.isEmpty) return;
@@ -277,28 +358,11 @@ class MyStoreController extends GetxController {
     _applyProfile(updated);
   }
 
-  Future<void> verifyOwnerForDev() async {
-    final current = profile.value ?? await repo.fetchProfile();
-
-    final updated = current.copyWith(
-      isOwnerVerified: true,
-    );
-
-    _applyProfile(updated);
-  }
-
-  Future<void> clearOwnerVerificationForDev() async {
-    final current = profile.value ?? await repo.fetchProfile();
-
-    final updated = current.copyWith(
-      isOwnerVerified: false,
-    );
-
-    _applyProfile(updated);
-  }
-
   void applyDeletedPost(String postId) {
-    myPosts.removeWhere((e) => e.id == postId);
+    final id = postId.trim();
+    if (id.isEmpty) return;
+
+    myPosts.removeWhere((e) => e.id == id);
   }
 
   void applyUpdatedPost(Post updated) {

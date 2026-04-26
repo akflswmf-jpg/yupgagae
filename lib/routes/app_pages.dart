@@ -3,7 +3,7 @@ import 'package:get/get.dart';
 
 import 'app_routes.dart';
 
-// ❌ 스플래시 제거
+import 'package:yupgagae/core/navigation/route_input_resolver.dart';
 
 // 루트
 import 'package:yupgagae/root_shell.dart';
@@ -52,10 +52,9 @@ class AppPages {
     GetPage(
       name: AppRoutes.postDetail,
       page: () {
-        final args = Get.arguments as Map?;
-        final postId = (args?['postId'] ?? '').toString().trim();
+        final postId = RouteInputResolver.string('postId');
 
-        if (postId.isEmpty) {
+        if (postId == null || postId.trim().isEmpty) {
           return const Scaffold(
             body: Center(
               child: Text('postId required'),
@@ -63,7 +62,7 @@ class AppPages {
           );
         }
 
-        return PostDetailScreen(postId: postId);
+        return PostDetailScreen(postId: postId.trim());
       },
       binding: PostDetailBinding(),
     ),

@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
 import 'package:yupgagae/features/my_store/domain/app_notification_item.dart';
@@ -11,12 +11,12 @@ import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart'
 
 class PostDetailController extends GetxController {
   final PostRepository repo;
-  final AnonSessionService session;
+  final AuthSessionService auth;
   final StoreProfileRepository storeProfileRepo;
 
   PostDetailController({
     required this.repo,
-    required this.session,
+    required this.auth,
     required this.storeProfileRepo,
   });
 
@@ -33,7 +33,9 @@ class PostDetailController extends GetxController {
   bool _didInitialize = false;
   bool _didIncrementView = false;
 
-  String get currentUserId => session.anonId;
+  int _loadGeneration = 0;
+
+  String get currentUserId => auth.currentUserId;
 
   String get postId => _postId ?? '';
 
@@ -83,11 +85,15 @@ class PostDetailController extends GetxController {
   }
 
   Future<void> load() async {
-    if (!isReady) {
+    final targetPostId = postId.trim();
+
+    if (targetPostId.isEmpty) {
       error.value = 'postId required';
       post.value = null;
       return;
     }
+
+    final generation = ++_loadGeneration;
 
     isLoading.value = true;
     error.value = null;
@@ -95,20 +101,45 @@ class PostDetailController extends GetxController {
     try {
       await _ensureRepositoryReady();
 
-      final loaded = await repo.getPostById(postId);
+      final loaded = await repo.getPostById(targetPostId);
+
+      if (!_isCurrentLoadTarget(
+        generation: generation,
+        targetPostId: targetPostId,
+      )) {
+        return;
+      }
+
       post.value = loaded;
 
-      unawaited(_incrementViewSilently());
+      unawaited(
+        _incrementViewSilently(
+          targetPostId: targetPostId,
+          generation: generation,
+          baseViewCount: loaded.viewCount,
+        ),
+      );
     } catch (e) {
+      if (!_isCurrentLoadTarget(
+        generation: generation,
+        targetPostId: targetPostId,
+      )) {
+        return;
+      }
+
       error.value = e.toString();
       post.value = null;
     } finally {
-      isLoading.value = false;
+      if (_loadGeneration == generation) {
+        isLoading.value = false;
+      }
     }
   }
 
   Future<void> refreshPost() async {
-    if (!isReady) {
+    final targetPostId = postId.trim();
+
+    if (targetPostId.isEmpty) {
       error.value = 'postId required';
       post.value = null;
       return;
@@ -117,9 +148,18 @@ class PostDetailController extends GetxController {
     error.value = null;
 
     try {
-      final loaded = await repo.getPostById(postId);
+      final loaded = await repo.getPostById(targetPostId);
+
+      if (_postId != targetPostId) {
+        return;
+      }
+
       post.value = loaded;
     } catch (e) {
+      if (_postId != targetPostId) {
+        return;
+      }
+
       error.value = e.toString();
     }
   }
@@ -141,28 +181,44 @@ class PostDetailController extends GetxController {
     }
   }
 
-  Future<void> _incrementViewSilently() async {
-    if (!isReady) return;
+  Future<void> _incrementViewSilently({
+    required String targetPostId,
+    required int generation,
+    required int baseViewCount,
+  }) async {
+    if (targetPostId.trim().isEmpty) return;
+    if (_postId != targetPostId) return;
     if (_didIncrementView) return;
 
     _didIncrementView = true;
 
     try {
-      await repo.incrementView(postId);
+      await repo.incrementView(targetPostId);
+
+      if (!_isCurrentLoadTarget(
+        generation: generation,
+        targetPostId: targetPostId,
+      )) {
+        return;
+      }
 
       final current = post.value;
-      if (current == null || current.id != postId) return;
+      if (current == null || current.id != targetPostId) return;
+
+      final nextViewCount =
+          current.viewCount <= baseViewCount ? baseViewCount + 1 : current.viewCount;
 
       post.value = current.copyWith(
-        viewCount: current.viewCount + 1,
+        viewCount: nextViewCount,
       );
     } catch (_) {}
   }
 
   Future<Post> toggleLike() async {
     final current = post.value;
+    final targetPostId = postId.trim();
 
-    if (!isReady || current == null) {
+    if (targetPostId.isEmpty || current == null) {
       throw Exception('게시글을 찾을 수 없습니다.');
     }
 
@@ -177,20 +233,24 @@ class PostDetailController extends GetxController {
       final before = post.value;
 
       final updated = await repo.toggleLike(
-        postId: postId,
+        postId: targetPostId,
       );
 
-      post.value = updated;
+      if (_postId == targetPostId) {
+        post.value = updated;
+      }
 
-      _maybeNotifyLike(
-        before: before,
-        after: updated,
+      unawaited(
+        _maybeNotifyLike(
+          before: before,
+          after: updated,
+        ),
       );
 
       return updated;
     } catch (e) {
       error.value = e.toString();
-      return current;
+      rethrow;
     } finally {
       isTogglingLike.value = false;
     }
@@ -198,8 +258,9 @@ class PostDetailController extends GetxController {
 
   Future<Post> toggleSold() async {
     final current = post.value;
+    final targetPostId = postId.trim();
 
-    if (!isReady || current == null) {
+    if (targetPostId.isEmpty || current == null) {
       throw Exception('게시글을 찾을 수 없습니다.');
     }
 
@@ -212,25 +273,29 @@ class PostDetailController extends GetxController {
 
     try {
       final updated = await repo.toggleSold(
-        postId: postId,
+        postId: targetPostId,
       );
 
-      post.value = updated;
+      if (_postId == targetPostId) {
+        post.value = updated;
+      }
+
       return updated;
     } catch (e) {
       error.value = e.toString();
-      return current;
+      rethrow;
     } finally {
       isTogglingSold.value = false;
     }
   }
 
   Future<bool> canDeletePost() async {
-    if (!isReady) return false;
+    final targetPostId = postId.trim();
+    if (targetPostId.isEmpty) return false;
 
     try {
       return await repo.canDeletePost(
-        postId: postId,
+        postId: targetPostId,
       );
     } catch (e) {
       error.value = e.toString();
@@ -239,7 +304,9 @@ class PostDetailController extends GetxController {
   }
 
   Future<bool> deletePost() async {
-    if (!isReady) return false;
+    final targetPostId = postId.trim();
+
+    if (targetPostId.isEmpty) return false;
     if (isDeleting.value) return false;
 
     isDeleting.value = true;
@@ -247,10 +314,13 @@ class PostDetailController extends GetxController {
 
     try {
       await repo.deletePost(
-        postId: postId,
+        postId: targetPostId,
       );
 
-      post.value = null;
+      if (_postId == targetPostId) {
+        post.value = null;
+      }
+
       return true;
     } catch (e) {
       error.value = e.toString();
@@ -265,7 +335,9 @@ class PostDetailController extends GetxController {
   }
 
   Future<void> reportPost(String reason) async {
-    if (!isReady) return;
+    final targetPostId = postId.trim();
+
+    if (targetPostId.isEmpty) return;
     if (isReporting.value) return;
 
     final normalizedReason = reason.trim();
@@ -279,12 +351,16 @@ class PostDetailController extends GetxController {
 
     try {
       await repo.reportPost(
-        postId: postId,
+        postId: targetPostId,
         reason: normalizedReason,
       );
 
+      if (_postId != targetPostId) {
+        return;
+      }
+
       final current = post.value;
-      if (current == null) return;
+      if (current == null || current.id != targetPostId) return;
 
       if (current.reportedUserIds.contains(currentUserId)) {
         return;
@@ -348,6 +424,13 @@ class PostDetailController extends GetxController {
 
   void decreaseCommentCount([int amount = 1]) {
     increaseCommentCount(-amount);
+  }
+
+  bool _isCurrentLoadTarget({
+    required int generation,
+    required String targetPostId,
+  }) {
+    return _loadGeneration == generation && _postId == targetPostId;
   }
 
   Future<void> _maybeNotifyLike({

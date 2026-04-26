@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/controller/owner_board_controller.dart';
 import 'package:yupgagae/features/community/controller/post_list_controller.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
@@ -43,7 +43,7 @@ class _CommunityShellState extends State<CommunityShell>
       _usedBoardController = Get.put<PostListController>(
         PostListController(
           repo: Get.find<PostRepository>(),
-          session: Get.find<AnonSessionService>(),
+          auth: Get.find<AuthSessionService>(),
           boardType: BoardType.used,
         ),
         tag: 'used_board',

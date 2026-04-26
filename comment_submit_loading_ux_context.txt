@@ -1,0 +1,3144 @@
+﻿
+================================================
+FILE_PATH: lib/features/community/view/post_detail_screen.dart
+================================================
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/features/community/controller/comment_controller.dart';
+import 'package:yupgagae/features/community/controller/post_detail_controller.dart';
+import 'package:yupgagae/features/community/domain/comment.dart';
+import 'package:yupgagae/features/community/domain/post.dart';
+import 'package:yupgagae/features/community/view/widgets/post_detail_body.dart';
+import 'package:yupgagae/features/my_store/controller/my_store_controller.dart';
+import 'package:yupgagae/features/my_store/domain/blocked_user_item.dart';
+import 'package:yupgagae/routes/app_routes.dart';
+
+const Color kCommentAccentDark = Color(0xFF875646);
+const Color kCommentHint = Color(0xFF9CA3AF);
+const Color kCommentText = Color(0xFF111111);
+const Color kYupgagaeSnackBg = Color(0xFF875646);
+
+class PostDetailScreen extends StatefulWidget {
+  final String postId;
+
+  const PostDetailScreen({
+    super.key,
+    required this.postId,
+  });
+
+  @override
+  State<PostDetailScreen> createState() => _PostDetailScreenState();
+}
+
+class _PostDetailScreenState extends State<PostDetailScreen> {
+  late final PostDetailController c;
+  late final CommentController commentC;
+  late final ScrollController _scrollController;
+  late final MyStoreController myStoreC;
+
+  final TextEditingController _commentCtrl = TextEditingController();
+  final FocusNode _commentFocusNode = FocusNode();
+
+  final RxBool _isSubmittingLocal = false.obs;
+
+  bool _bootLoading = true;
+  String? _bootError;
+
+  bool _commentBootStarted = false;
+  bool _commentBootDone = false;
+
+  String get _postId => widget.postId.trim();
+
+  @override
+  void initState() {
+    super.initState();
+
+    c = Get.find<PostDetailController>();
+    commentC = Get.find<CommentController>();
+    myStoreC = Get.find<MyStoreController>();
+    _scrollController = ScrollController();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _boot();
+    });
+  }
+
+  Future<void> _boot() async {
+    if (_postId.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _bootLoading = false;
+        _bootError = 'postId required';
+      });
+      return;
+    }
+
+    try {
+      await c.initialize(_postId);
+
+      if (!mounted) return;
+      setState(() {
+        _bootLoading = false;
+        _bootError = null;
+      });
+
+      unawaited(_startCommentBoot());
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _bootLoading = false;
+        _bootError = e.toString();
+      });
+    }
+  }
+
+  Future<void> _startCommentBoot() async {
+    if (_commentBootStarted) return;
+    _commentBootStarted = true;
+
+    try {
+      await commentC.initialize(_postId);
+    } catch (_) {
+    } finally {
+      if (!mounted) return;
+      _commentBootDone = true;
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _commentFocusNode.unfocus();
+    _scrollController.dispose();
+    _commentCtrl.dispose();
+    _commentFocusNode.dispose();
+    super.dispose();
+  }
+
+  String _timeLabel(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+
+    if (diff.inMinutes < 1) return '방금';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}분 전';
+    if (diff.inHours < 24) return '${diff.inHours}시간 전';
+    return '${diff.inDays}일 전';
+  }
+
+  void _dismissKeyboard() {
+    final scope = FocusScope.of(context);
+    if (!scope.hasPrimaryFocus && scope.focusedChild != null) {
+      scope.unfocus();
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    _commentFocusNode.unfocus();
+  }
+
+  Future<void> _settleKeyboard() async {
+    _dismissKeyboard();
+    await Future.delayed(const Duration(milliseconds: 180));
+  }
+
+  void _dismissKeyboardForSubmit() {
+    _dismissKeyboard();
+  }
+
+  void _scrollToBottom({bool animated = false}) {
+    if (!mounted || !_scrollController.hasClients) return;
+
+    final target = _scrollController.position.maxScrollExtent;
+    if (animated) {
+      _scrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+      );
+      return;
+    }
+    _scrollController.jumpTo(target);
+  }
+
+  Future<void> _scrollToBottomAfterCommentInsert() async {
+    for (var i = 0; i < 4; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      _scrollToBottom(animated: false);
+    }
+  }
+
+  Future<void> _submitComment() async {
+    final text = _commentCtrl.text.trim();
+    if (text.isEmpty) return;
+    if (_isSubmittingLocal.value) return;
+    if (commentC.isSubmitting.value) return;
+    if (!_commentBootDone) return;
+
+    _isSubmittingLocal.value = true;
+    _commentCtrl.clear();
+    _dismissKeyboardForSubmit();
+
+    try {
+      final createdComment = await commentC.add(text);
+
+      c.applyUpdatedCommentCount(commentC.activeCommentCount);
+
+      if (!mounted) return;
+
+      if (createdComment.id.trim().isNotEmpty) {
+        unawaited(_scrollToBottomAfterCommentInsert());
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _scrollToBottom(animated: false);
+        });
+      }
+
+      _showSnack('댓글을 등록했어요.');
+    } catch (e) {
+      _commentCtrl.text = text;
+      _commentCtrl.selection = TextSelection.fromPosition(
+        TextPosition(offset: _commentCtrl.text.length),
+      );
+      _showSnack(e.toString());
+    } finally {
+      if (mounted) {
+        _isSubmittingLocal.value = false;
+      }
+    }
+  }
+
+  Future<void> _openThread({
+    required String commentId,
+    String? editingCommentId,
+  }) async {
+    final rootId = commentC.resolveReplyRootId(commentId);
+
+    await _settleKeyboard();
+
+    final result = await Get.toNamed(
+      AppRoutes.commentThread,
+      arguments: {
+        'postId': _postId,
+        'rootCommentId': rootId,
+        'focusCommentId': commentId,
+        'editingCommentId': editingCommentId,
+      },
+    );
+
+    await _settleKeyboard();
+
+    if (!mounted) return;
+
+    if (result == true) {
+      c.applyUpdatedCommentCount(commentC.activeCommentCount);
+      unawaited(c.refreshPost());
+
+      unawaited(_scrollToBottomAfterCommentInsert());
+    }
+  }
+
+  Future<void> _onReplyTap(String commentId) async {
+    await _openThread(commentId: commentId);
+  }
+
+  Future<void> _onEditTap(String commentId, String currentText) async {
+    await _openThread(
+      commentId: commentId,
+      editingCommentId: commentId,
+    );
+  }
+
+  Future<void> _onDelete(Comment comment) async {
+    final ok = await _showConfirmDialog(
+      title: '댓글 삭제',
+      message: '이 댓글을 삭제할까요?',
+      confirmText: '삭제',
+      isDestructive: true,
+    );
+
+    if (!ok) return;
+
+    await _settleKeyboard();
+
+    try {
+      await commentC.delete(comment.id);
+      c.applyUpdatedCommentCount(commentC.activeCommentCount);
+      _showSnack('댓글을 삭제했어요.');
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
+  Future<void> _onReport(Comment comment) async {
+    final reason = await _showReasonPicker(title: '댓글 신고');
+    if (reason == null) return;
+
+    await _settleKeyboard();
+
+    try {
+      await commentC.report(
+        commentId: comment.id,
+        reason: reason,
+      );
+      _showSnack('댓글을 신고했어요.');
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
+  Future<void> _onReportPost() async {
+    final reason = await _showReasonPicker(title: '게시글 신고');
+    if (reason == null) return;
+
+    await _settleKeyboard();
+
+    try {
+      await c.reportThisPost(reason);
+      _showSnack('게시글을 신고했어요.');
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
+  Future<void> _onBlockPostAuthor() async {
+    final post = c.post.value;
+    if (post == null) return;
+
+    if (post.authorId.trim().isEmpty) {
+      _showSnack('차단할 사용자를 찾을 수 없어요.');
+      return;
+    }
+
+    final alreadyBlocked = myStoreC.blockedUsers.any(
+      (e) => e.userId == post.authorId,
+    );
+
+    if (alreadyBlocked) {
+      _showSnack('이미 차단한 사용자예요.');
+      return;
+    }
+
+    final ok = await _showConfirmDialog(
+      title: '사용자 차단',
+      message:
+          '${post.authorLabel} 사용자를 차단할까요?\n이 사용자의 게시글과 댓글은 보이지 않게 됩니다.',
+      confirmText: '차단',
+      isDestructive: true,
+    );
+
+    if (!ok) return;
+
+    await _settleKeyboard();
+
+    try {
+      await myStoreC.blockUser(
+        BlockedUserItem(
+          userId: post.authorId,
+          nickname: post.authorLabel.trim().isEmpty ? '익명' : post.authorLabel,
+          industry: post.industryId,
+          region: post.locationLabel,
+          blockedAt: DateTime.now(),
+        ),
+      );
+
+      if (!mounted) return;
+      _showSnack('사용자를 차단했어요.');
+      Get.back(result: true);
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
+  Future<void> _onDeletePost() async {
+    final ok = await _showConfirmDialog(
+      title: '게시글 삭제',
+      message: '이 게시글을 삭제할까요?',
+      confirmText: '삭제',
+      isDestructive: true,
+    );
+    if (!ok) return;
+
+    await _settleKeyboard();
+
+    final deleted = await c.deleteThisPost();
+    if (!mounted) return;
+
+    if (deleted) {
+      Get.back(result: true);
+      return;
+    }
+
+    _showSnack(c.error.value ?? '게시글 삭제에 실패했어요.');
+  }
+
+  Future<void> _onEditPost() async {
+    final post = c.post.value;
+    if (post == null) return;
+
+    await _settleKeyboard();
+
+    final result = await Get.toNamed(
+      AppRoutes.writePost,
+      arguments: {
+        'postId': post.id,
+        'boardType': post.boardType.key,
+      },
+    );
+
+    if (result == true) {
+      await c.refreshPost();
+      await commentC.load();
+      if (!mounted) return;
+      _showSnack('게시글을 수정했어요.');
+    }
+  }
+
+  Future<void> _onToggleSold() async {
+    final post = c.post.value;
+    if (post == null) return;
+    if (post.boardType != BoardType.used) return;
+
+    final ok = await _showConfirmDialog(
+      title: post.isSold ? '거래완료 해제' : '거래완료 처리',
+      message: post.isSold
+          ? '거래완료 상태를 해제할까요?'
+          : '이 게시글을 거래완료 처리할까요?',
+      confirmText: post.isSold ? '해제' : '완료',
+    );
+    if (!ok) return;
+
+    await _settleKeyboard();
+
+    try {
+      final updated = await c.toggleSold();
+      if (!mounted) return;
+
+      _showSnack(
+        updated.isSold ? '거래완료 처리됐어요.' : '거래완료가 해제됐어요.',
+      );
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        duration: const Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: kYupgagaeSnackBg,
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _showConfirmDialog({
+    required String title,
+    required String message,
+    required String confirmText,
+    bool isDestructive = false,
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('취소'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(
+                confirmText,
+                style: TextStyle(
+                  color: isDestructive ? Colors.red : null,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
+  Future<String?> _showReasonPicker({
+    required String title,
+  }) async {
+    const reasons = <String>[
+      '광고/홍보성 내용',
+      '욕설/비방',
+      '음란/불쾌한 내용',
+      '도배/스팸',
+      '기타',
+    ];
+
+    return showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              for (final reason in reasons)
+                ListTile(
+                  title: Text(reason),
+                  onTap: () => Navigator.of(context).pop(reason),
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  List<Widget> _buildOwnerActions(Post post) {
+    final children = <Widget>[];
+
+    if (post.boardType == BoardType.used) {
+      children.add(
+        Obx(() {
+          final toggling = c.isTogglingSold.value;
+          final sold = c.post.value?.isSold ?? post.isSold;
+
+          return IconButton(
+            tooltip: sold ? '거래완료 해제' : '거래완료 처리',
+            onPressed: toggling ? null : _onToggleSold,
+            icon: Icon(
+              sold ? Icons.check_circle : Icons.check_circle_outline,
+              color: sold
+                  ? const Color(0xFFA56E5F)
+                  : const Color(0xFF111111),
+            ),
+          );
+        }),
+      );
+    }
+
+    children.addAll([
+      IconButton(
+        tooltip: '수정',
+        onPressed: _onEditPost,
+        icon: const Icon(
+          Icons.edit_outlined,
+          color: Color(0xFF111111),
+        ),
+      ),
+      IconButton(
+        tooltip: '삭제',
+        onPressed: _onDeletePost,
+        icon: const Icon(
+          Icons.delete_outline,
+          color: Color(0xFF111111),
+        ),
+      ),
+    ]);
+
+    return children;
+  }
+
+  List<Widget> _buildGuestActions() {
+    return [
+      IconButton(
+        tooltip: '신고',
+        onPressed: _onReportPost,
+        icon: const Icon(
+          Icons.flag_outlined,
+          color: Color(0xFF111111),
+        ),
+      ),
+      IconButton(
+        tooltip: '차단',
+        onPressed: _onBlockPostAuthor,
+        icon: const Icon(
+          Icons.block_outlined,
+          color: Color(0xFFE5484D),
+        ),
+      ),
+    ];
+  }
+
+  PreferredSizeWidget _buildAppBar() {
+    return AppBar(
+      title: const Text(
+        '게시물',
+        style: TextStyle(
+          fontWeight: FontWeight.w800,
+          color: Color(0xFF111111),
+        ),
+      ),
+      backgroundColor: Colors.white,
+      elevation: 0,
+      actions: [
+        Obx(() {
+          final post = c.post.value;
+          if (post == null) return const SizedBox.shrink();
+
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: c.isOwner ? _buildOwnerActions(post) : _buildGuestActions(),
+          );
+        }),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_bootLoading) {
+      return Scaffold(
+        appBar: _buildAppBar(),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_bootError != null) {
+      return Scaffold(
+        appBar: _buildAppBar(),
+        body: Center(child: Text(_bootError!)),
+      );
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: _dismissKeyboard,
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        appBar: _buildAppBar(),
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                bottom: 56,
+                child: RepaintBoundary(
+                  child: Stack(
+                    children: [
+                      PostDetailBody(
+                        c: c,
+                        commentC: commentC,
+                        scrollController: _scrollController,
+                        timeLabel: _timeLabel,
+                        onCommentTap: () {
+                          if (!_commentBootDone) return;
+                          _commentFocusNode.requestFocus();
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            _scrollToBottom(animated: false);
+                          });
+                        },
+                        onReplyTap: _onReplyTap,
+                        onEditTap: _onEditTap,
+                        activeReplyId: null,
+                        activeEditingId: null,
+                        onDelete: _onDelete,
+                        onReport: _onReport,
+                        onLikeTap: c.toggleLike,
+                      ),
+                      if (!_commentBootDone)
+                        const Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: LinearProgressIndicator(
+                            minHeight: 2,
+                            color: kCommentAccentDark,
+                            backgroundColor: Color(0xFFEDE7E3),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _KeyboardInsetFollower(
+                  child: _BottomCommentBar(
+                    controller: _commentCtrl,
+                    focusNode: _commentFocusNode,
+                    isSubmitting: _isSubmittingLocal,
+                    isCommentReady: _commentBootDone,
+                    onSubmit: _submitComment,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _KeyboardInsetFollower extends StatelessWidget {
+  final Widget child;
+
+  const _KeyboardInsetFollower({
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+
+    return RepaintBoundary(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: child,
+      ),
+    );
+  }
+}
+
+class _BottomCommentBar extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final RxBool isSubmitting;
+  final bool isCommentReady;
+  final Future<void> Function() onSubmit;
+
+  const _BottomCommentBar({
+    required this.controller,
+    required this.focusNode,
+    required this.isSubmitting,
+    required this.isCommentReady,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: Material(
+        color: Colors.white,
+        elevation: 8,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: 38),
+                    child: TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      inputFormatters: [
+                        LengthLimitingTextInputFormatter(
+                          CommentController.maxCommentLength,
+                        ),
+                      ],
+                      maxLength: CommentController.maxCommentLength,
+                      maxLengthEnforcement: MaxLengthEnforcement.enforced,
+                      buildCounter: (
+                        context, {
+                        required currentLength,
+                        required isFocused,
+                        required maxLength,
+                      }) {
+                        return null;
+                      },
+                      minLines: 1,
+                      maxLines: 2,
+                      enabled: true,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (_) {
+                        if (!isCommentReady) return;
+                        onSubmit();
+                      },
+                      decoration: const InputDecoration(
+                        hintText: '댓글을 입력하세요.',
+                        hintStyle: TextStyle(
+                          color: kCommentHint,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        isDense: true,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        errorBorder: InputBorder.none,
+                        focusedErrorBorder: InputBorder.none,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 0,
+                          vertical: 8,
+                        ),
+                      ),
+                      style: const TextStyle(
+                        color: kCommentText,
+                        fontSize: 14,
+                        height: 1.35,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Obx(() {
+                  final enabled = !isSubmitting.value && isCommentReady;
+
+                  return TextButton(
+                    onPressed: enabled ? onSubmit : null,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 8,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(
+                      '등록',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: enabled
+                            ? kCommentAccentDark
+                            : const Color(0xFFB6A79F),
+                      ),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// END_OF_FILE: lib/features/community/view/post_detail_screen.dart
+
+================================================
+FILE_PATH: lib/features/community/view/community_thread_screen.dart
+================================================
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/navigation/route_input_resolver.dart';
+import 'package:yupgagae/features/community/controller/comment_controller.dart';
+import 'package:yupgagae/features/community/domain/comment.dart';
+import 'package:yupgagae/features/community/view/widgets/post_detail_comments_section.dart';
+
+const Color kThreadSnackBg = Color(0xFF875646);
+
+class CommunityThreadScreen extends StatefulWidget {
+  const CommunityThreadScreen({super.key});
+
+  @override
+  State<CommunityThreadScreen> createState() => _CommunityThreadScreenState();
+}
+
+class _CommunityThreadScreenState extends State<CommunityThreadScreen> {
+  late final CommentController c;
+  late final ScrollController _scrollController;
+
+  final TextEditingController _inputCtrl = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
+
+  final RxBool _isSubmittingLocal = false.obs;
+  final Map<String, GlobalKey> _commentItemKeys = <String, GlobalKey>{};
+
+  bool _isPopping = false;
+  bool _didSubmit = false;
+
+  String _postId = '';
+  String _rootCommentId = '';
+  String? _focusCommentId;
+  String? _editingCommentId;
+  String? _latestSubmittedReplyId;
+
+  bool _bootLoading = true;
+  String? _bootError;
+
+  @override
+  void initState() {
+    super.initState();
+
+    c = Get.find<CommentController>();
+    _scrollController = ScrollController();
+
+    _postId = RouteInputResolver.string('postId')?.trim() ?? '';
+    _rootCommentId = RouteInputResolver.string('rootCommentId')?.trim() ?? '';
+
+    final focusRaw = RouteInputResolver.string('focusCommentId')?.trim() ?? '';
+    _focusCommentId = focusRaw.isEmpty ? null : focusRaw;
+
+    final editingRaw =
+        RouteInputResolver.string('editingCommentId')?.trim() ?? '';
+    _editingCommentId = editingRaw.isEmpty ? null : editingRaw;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (_postId.isEmpty || _rootCommentId.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _bootLoading = false;
+          _bootError = 'postId 또는 rootCommentId가 없습니다.';
+        });
+        return;
+      }
+
+      try {
+        await c.initialize(_postId);
+
+        if (_editingCommentId != null) {
+          final editingTarget = c.commentById(_editingCommentId!);
+          if (editingTarget != null &&
+              !editingTarget.isDeleted &&
+              !editingTarget.isReportThresholdReached) {
+            _inputCtrl.text = editingTarget.text;
+          } else {
+            _editingCommentId = null;
+          }
+        }
+
+        if (!mounted) return;
+        setState(() {
+          _bootLoading = false;
+          _bootError = null;
+        });
+
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+
+          if (_editingCommentId != null) {
+            _focusNode.requestFocus();
+          }
+
+          _scrollToTargetOrBottom();
+        });
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _bootLoading = false;
+          _bootError = e.toString();
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _focusNode.unfocus();
+    _scrollController.dispose();
+    _inputCtrl.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  GlobalKey _keyForComment(String commentId) {
+    return _commentItemKeys.putIfAbsent(
+      commentId,
+      () => GlobalKey(debugLabel: 'thread_comment_$commentId'),
+    );
+  }
+
+  String _timeLabel(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return '방금';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}분 전';
+    if (diff.inHours < 24) return '${diff.inHours}시간 전';
+    return '${diff.inDays}일 전';
+  }
+
+  void _dismissKeyboard() {
+    final scope = FocusScope.of(context);
+    if (!scope.hasPrimaryFocus && scope.focusedChild != null) {
+      scope.unfocus();
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    _focusNode.unfocus();
+  }
+
+  void _dismissKeyboardForSubmit() {
+    _dismissKeyboard();
+  }
+
+  void _scrollToBottom({bool animated = false}) {
+    if (!mounted || !_scrollController.hasClients) return;
+
+    final target = _scrollController.position.maxScrollExtent;
+
+    if (animated) {
+      _scrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+      );
+      return;
+    }
+
+    _scrollController.jumpTo(target);
+  }
+
+  Future<void> _scrollToBottomAfterLocalReplyInsert() async {
+    for (var i = 0; i < 4; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      _scrollToBottom(animated: false);
+    }
+  }
+
+  void _jumpNearTarget(String commentId) {
+    if (!mounted || !_scrollController.hasClients) return;
+
+    if (commentId == _rootCommentId) {
+      _scrollController.jumpTo(0);
+      return;
+    }
+
+    final index = c.replyIndexOf(
+      rootCommentId: _rootCommentId,
+      replyId: commentId,
+    );
+
+    if (index < 0) return;
+
+    final estimatedOffset = 120.0 + (index * 92.0);
+    final maxScrollExtent = _scrollController.position.maxScrollExtent;
+
+    _scrollController.jumpTo(
+      estimatedOffset.clamp(0.0, maxScrollExtent),
+    );
+  }
+
+  Future<void> _ensureCommentVisible(String commentId) async {
+    if (!mounted) return;
+
+    _jumpNearTarget(commentId);
+
+    for (var i = 0; i < 6; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
+      final targetContext = _commentItemKeys[commentId]?.currentContext;
+      if (targetContext == null) {
+        _jumpNearTarget(commentId);
+        continue;
+      }
+
+      await Scrollable.ensureVisible(
+        targetContext,
+        duration: Duration.zero,
+        alignment: 0.08,
+        curve: Curves.linear,
+      );
+      return;
+    }
+  }
+
+  Future<void> _forceRevealNewReply(String replyId) async {
+    if (replyId.trim().isEmpty) return;
+
+    for (var i = 0; i < 5; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
+      final targetContext = _commentItemKeys[replyId]?.currentContext;
+      if (targetContext != null) {
+        await Scrollable.ensureVisible(
+          targetContext,
+          duration: Duration.zero,
+          alignment: 0.78,
+          curve: Curves.linear,
+        );
+        return;
+      }
+
+      _scrollToBottom(animated: false);
+    }
+
+    if (!mounted) return;
+    _scrollToBottom(animated: false);
+  }
+
+  Future<void> _submit() async {
+    final text = _inputCtrl.text.trim();
+    if (text.isEmpty) return;
+    if (_isSubmittingLocal.value) return;
+    if (c.isSubmitting.value) return;
+
+    final editingId = _editingCommentId;
+
+    _isSubmittingLocal.value = true;
+    _inputCtrl.clear();
+    _dismissKeyboardForSubmit();
+
+    try {
+      if (editingId != null) {
+        await c.updateComment(
+          commentId: editingId,
+          text: text,
+        );
+
+        _didSubmit = true;
+
+        if (!mounted) return;
+
+        setState(() {
+          _editingCommentId = null;
+        });
+
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          unawaited(_ensureCommentVisible(editingId));
+        });
+
+        _showSnack('댓글을 수정했어요.');
+      } else {
+        final submitFuture = c.reply(
+          parentCommentId: _rootCommentId,
+          text: text,
+        );
+
+        unawaited(_scrollToBottomAfterLocalReplyInsert());
+
+        final createdReply = await submitFuture;
+
+        final replyId = createdReply.id;
+        _didSubmit = true;
+
+        if (!mounted) return;
+
+        setState(() {
+          _latestSubmittedReplyId = replyId.trim().isEmpty ? null : replyId;
+        });
+
+        if (replyId.trim().isNotEmpty) {
+          unawaited(_forceRevealNewReply(replyId));
+        } else {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _scrollToBottom(animated: false);
+          });
+        }
+
+        _showSnack('답글을 등록했어요.');
+      }
+    } catch (e) {
+      _inputCtrl.text = text;
+      _inputCtrl.selection = TextSelection.fromPosition(
+        TextPosition(offset: _inputCtrl.text.length),
+      );
+      _showSnack(e.toString());
+    } finally {
+      if (mounted) {
+        _isSubmittingLocal.value = false;
+      }
+    }
+  }
+
+  void _startEdit(Comment comment) {
+    if (comment.isDeleted || comment.isReportThresholdReached) return;
+
+    _inputCtrl.text = comment.text;
+    _inputCtrl.selection = TextSelection.fromPosition(
+      TextPosition(offset: _inputCtrl.text.length),
+    );
+
+    setState(() {
+      _editingCommentId = comment.id;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _focusNode.requestFocus();
+      unawaited(_ensureCommentVisible(comment.id));
+    });
+  }
+
+  void _cancelEdit() {
+    _dismissKeyboard();
+
+    Future.delayed(const Duration(milliseconds: 180), () {
+      if (!mounted) return;
+      setState(() {
+        _editingCommentId = null;
+      });
+      _inputCtrl.clear();
+    });
+  }
+
+  Future<void> _delete(Comment comment) async {
+    final ok = await _showConfirmDialog(
+      title: '댓글 삭제',
+      message: '이 댓글을 삭제할까요?',
+      confirmText: '삭제',
+      isDestructive: true,
+    );
+
+    if (!ok) return;
+
+    _dismissKeyboard();
+
+    try {
+      await c.delete(comment.id);
+      _showSnack('댓글을 삭제했어요.');
+
+      if (_editingCommentId == comment.id) {
+        _cancelEdit();
+      }
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
+  Future<void> _report(Comment comment) async {
+    final reason = await _showReasonPicker(title: '댓글 신고');
+    if (reason == null) return;
+
+    _dismissKeyboard();
+
+    try {
+      await c.report(
+        commentId: comment.id,
+        reason: reason,
+      );
+      _showSnack('댓글을 신고했어요.');
+    } catch (e) {
+      _showSnack(e.toString());
+    }
+  }
+
+  Future<bool> _showConfirmDialog({
+    required String title,
+    required String message,
+    required String confirmText,
+    bool isDestructive = false,
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('취소'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(
+                confirmText,
+                style: TextStyle(
+                  color: isDestructive ? Colors.red : null,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
+  Future<String?> _showReasonPicker({required String title}) async {
+    const reasons = <String>[
+      '광고/홍보성 내용',
+      '욕설/비방',
+      '음란/불쾌한 내용',
+      '도배/스팸',
+      '기타',
+    ];
+
+    return showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              for (final reason in reasons)
+                ListTile(
+                  title: Text(reason),
+                  onTap: () => Navigator.of(context).pop(reason),
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        duration: const Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: kThreadSnackBg,
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+      ),
+    );
+  }
+
+  void _scrollToTargetOrBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+
+      final focusId = _focusCommentId;
+      if (focusId != null && focusId.isNotEmpty) {
+        unawaited(_ensureCommentVisible(focusId));
+        return;
+      }
+
+      _scrollToBottom(animated: false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_bootLoading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_bootError != null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('답글')),
+        body: Center(child: Text(_bootError!)),
+      );
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: _dismissKeyboard,
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        appBar: AppBar(
+          title: const Text('답글'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () {
+              if (_isPopping) return;
+              _isPopping = true;
+              _dismissKeyboard();
+              Get.back(result: _didSubmit);
+            },
+          ),
+        ),
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                bottom: _editingCommentId == null ? 56 : 98,
+                child: _ThreadBodyList(
+                  controller: c,
+                  scrollController: _scrollController,
+                  rootCommentId: _rootCommentId,
+                  latestSubmittedReplyId: _latestSubmittedReplyId,
+                  timeLabel: _timeLabel,
+                  itemKeyFor: _keyForComment,
+                  onEdit: _startEdit,
+                  onDelete: _delete,
+                  onReport: _report,
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _KeyboardInsetFollower(
+                  child: _BottomReplyBar(
+                    controller: _inputCtrl,
+                    focusNode: _focusNode,
+                    isSubmitting: _isSubmittingLocal,
+                    isEditing: _editingCommentId != null,
+                    onCancelEdit: _cancelEdit,
+                    onSubmit: _submit,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _KeyboardInsetFollower extends StatelessWidget {
+  final Widget child;
+
+  const _KeyboardInsetFollower({
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+
+    return RepaintBoundary(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: child,
+      ),
+    );
+  }
+}
+
+class _ThreadBodyList extends StatelessWidget {
+  final CommentController controller;
+  final ScrollController scrollController;
+  final String rootCommentId;
+  final String? latestSubmittedReplyId;
+  final String Function(DateTime) timeLabel;
+  final GlobalKey Function(String commentId) itemKeyFor;
+  final void Function(Comment comment) onEdit;
+  final Future<void> Function(Comment comment) onDelete;
+  final Future<void> Function(Comment comment) onReport;
+
+  const _ThreadBodyList({
+    required this.controller,
+    required this.scrollController,
+    required this.rootCommentId,
+    required this.latestSubmittedReplyId,
+    required this.timeLabel,
+    required this.itemKeyFor,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onReport,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: CustomScrollView(
+        controller: scrollController,
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+        slivers: [
+          SliverToBoxAdapter(
+            child: Container(
+              key: itemKeyFor(rootCommentId),
+              child: _RootCommentCard(
+                rootId: rootCommentId,
+                controller: controller,
+                timeLabel: timeLabel,
+                onEdit: onEdit,
+                onDelete: onDelete,
+                onReport: onReport,
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: _RepliesHeader(
+              controller: controller,
+              rootCommentId: rootCommentId,
+            ),
+          ),
+          _RepliesSliverList(
+            controller: controller,
+            rootCommentId: rootCommentId,
+            latestSubmittedReplyId: latestSubmittedReplyId,
+            timeLabel: timeLabel,
+            itemKeyFor: itemKeyFor,
+            onEdit: onEdit,
+            onDelete: onDelete,
+            onReport: onReport,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RepliesHeader extends StatelessWidget {
+  final CommentController controller;
+  final String rootCommentId;
+
+  const _RepliesHeader({
+    required this.controller,
+    required this.rootCommentId,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      controller.comments.length;
+
+      final count = controller.replyCountOf(rootCommentId);
+
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 2, 16, 4),
+        child: Text(
+          '답글 $count',
+          style: const TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF6B7280),
+          ),
+        ),
+      );
+    });
+  }
+}
+
+class _RepliesSliverList extends StatelessWidget {
+  final CommentController controller;
+  final String rootCommentId;
+  final String? latestSubmittedReplyId;
+  final String Function(DateTime) timeLabel;
+  final GlobalKey Function(String commentId) itemKeyFor;
+  final void Function(Comment comment) onEdit;
+  final Future<void> Function(Comment comment) onDelete;
+  final Future<void> Function(Comment comment) onReport;
+
+  const _RepliesSliverList({
+    required this.controller,
+    required this.rootCommentId,
+    required this.latestSubmittedReplyId,
+    required this.timeLabel,
+    required this.itemKeyFor,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onReport,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      controller.comments.length;
+
+      final allReplies = controller.repliesOf(rootCommentId);
+      final pinnedId = latestSubmittedReplyId?.trim();
+
+      final replies = <Comment>[
+        ...allReplies,
+      ];
+
+      if (pinnedId != null && pinnedId.isNotEmpty) {
+        final pinnedReply = controller.commentById(pinnedId);
+        final shouldAppendPinnedReply = pinnedReply != null &&
+            pinnedReply.parentId == rootCommentId &&
+            !replies.any((reply) => reply.id == pinnedReply.id);
+
+        if (shouldAppendPinnedReply) {
+          replies.add(pinnedReply);
+        }
+      }
+
+      if (replies.isEmpty) {
+        return const SliverToBoxAdapter(
+          child: SizedBox(height: 8),
+        );
+      }
+
+      return SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final reply = replies[index];
+
+            return Container(
+              key: itemKeyFor(reply.id),
+              child: RepaintBoundary(
+                child: _ReplyCommentCard(
+                  replyId: reply.id,
+                  controller: controller,
+                  timeLabel: timeLabel,
+                  onEdit: onEdit,
+                  onDelete: onDelete,
+                  onReport: onReport,
+                ),
+              ),
+            );
+          },
+          childCount: replies.length,
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
+          addSemanticIndexes: false,
+        ),
+      );
+    });
+  }
+}
+
+class _RootCommentCard extends StatelessWidget {
+  final String rootId;
+  final CommentController controller;
+  final String Function(DateTime) timeLabel;
+  final void Function(Comment comment) onEdit;
+  final Future<void> Function(Comment comment) onDelete;
+  final Future<void> Function(Comment comment) onReport;
+
+  const _RootCommentCard({
+    required this.rootId,
+    required this.controller,
+    required this.timeLabel,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onReport,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      controller.comments.length;
+
+      final root = controller.commentById(rootId);
+      if (root == null) return const SizedBox.shrink();
+
+      return CommunityCommentCard(
+        comment: root,
+        depth: 0,
+        currentUserId: controller.currentUserId,
+        timeLabel: timeLabel,
+        onReplyTap: (_) async {},
+        onEditTap: (comment) async => onEdit(comment),
+        onDeleteTap: onDelete,
+        onReportTap: onReport,
+        onToggleLikeTap: (comment) async {
+          await controller.toggleLike(comment.id);
+        },
+        replyLabel: '답글',
+        showReplyAction: false,
+        denseMeta: true,
+        margin: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFCFCFD),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFE7E9EE)),
+        ),
+        bodyLeftInset: 0,
+        actionLeftInset: 0,
+        replyArrowPadding: const EdgeInsets.only(right: 5),
+        replyArrowSize: 14,
+        actionSpacing: 12,
+        actionRunSpacing: 6,
+        moreIconSize: 16,
+        likeIconSize: 14,
+        likeTextSize: 12,
+        moreIconColor: const Color(0xFF6B7280),
+        deletedText: '삭제된 댓글입니다.',
+        blindedText: '블라인드 처리된 댓글입니다.',
+        textStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF1F2937),
+          fontWeight: FontWeight.w500,
+        ),
+        blockedTextStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF9CA3AF),
+          fontWeight: FontWeight.w500,
+        ),
+        actionTopSpacing: 8,
+      );
+    });
+  }
+}
+
+class _ReplyCommentCard extends StatelessWidget {
+  final String replyId;
+  final CommentController controller;
+  final String Function(DateTime) timeLabel;
+  final void Function(Comment comment) onEdit;
+  final Future<void> Function(Comment comment) onDelete;
+  final Future<void> Function(Comment comment) onReport;
+
+  const _ReplyCommentCard({
+    required this.replyId,
+    required this.controller,
+    required this.timeLabel,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onReport,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      controller.comments.length;
+
+      final reply = controller.commentById(replyId);
+      if (reply == null) return const SizedBox.shrink();
+
+      return CommunityCommentCard(
+        comment: reply,
+        depth: 1,
+        currentUserId: controller.currentUserId,
+        timeLabel: timeLabel,
+        onReplyTap: (_) async {},
+        onEditTap: (comment) async => onEdit(comment),
+        onDeleteTap: onDelete,
+        onReportTap: onReport,
+        onToggleLikeTap: (comment) async {
+          await controller.toggleLike(comment.id);
+        },
+        replyLabel: '답글 보기',
+        showReplyAction: false,
+        denseMeta: true,
+        margin: const EdgeInsets.fromLTRB(14, 0, 14, 0),
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 9),
+        decoration: const BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Color(0xFFF1F3F5)),
+          ),
+        ),
+        bodyLeftInset: 19,
+        actionLeftInset: 19,
+        replyArrowPadding: const EdgeInsets.only(right: 5),
+        replyArrowSize: 14,
+        actionSpacing: 12,
+        actionRunSpacing: 6,
+        moreIconSize: 16,
+        likeIconSize: 14,
+        likeTextSize: 12,
+        moreIconColor: Color(0xFF6B7280),
+        deletedText: '삭제된 댓글입니다.',
+        blindedText: '블라인드 처리된 댓글입니다.',
+        textStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF1F2937),
+          fontWeight: FontWeight.w500,
+        ),
+        blockedTextStyle: const TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          color: Color(0xFF9CA3AF),
+          fontWeight: FontWeight.w500,
+        ),
+        actionTopSpacing: 7,
+      );
+    });
+  }
+}
+
+class _BottomReplyBar extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final RxBool isSubmitting;
+  final bool isEditing;
+  final VoidCallback onCancelEdit;
+  final Future<void> Function() onSubmit;
+
+  const _BottomReplyBar({
+    required this.controller,
+    required this.focusNode,
+    required this.isSubmitting,
+    required this.isEditing,
+    required this.onCancelEdit,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final safeBottom = MediaQuery.viewPaddingOf(context).bottom;
+
+    return RepaintBoundary(
+      child: Material(
+        color: Colors.white,
+        elevation: 8,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(14, 8, 14, 8 + safeBottom),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isEditing)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          '댓글 수정 중',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF6B7280),
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: onCancelEdit,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 4,
+                          ),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: const Text(
+                          '취소',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF6B7280),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 38),
+                      child: TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        inputFormatters: [
+                          LengthLimitingTextInputFormatter(
+                            CommentController.maxCommentLength,
+                          ),
+                        ],
+                        maxLength: CommentController.maxCommentLength,
+                        maxLengthEnforcement: MaxLengthEnforcement.enforced,
+                        buildCounter: (
+                          context, {
+                          required currentLength,
+                          required isFocused,
+                          required maxLength,
+                        }) {
+                          return null;
+                        },
+                        minLines: 1,
+                        maxLines: 3,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => onSubmit(),
+                        decoration: InputDecoration(
+                          hintText:
+                              isEditing ? '댓글을 수정하세요.' : '답글을 입력하세요.',
+                          hintStyle: const TextStyle(
+                            color: Color(0xFF9CA3AF),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          isDense: true,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          errorBorder: InputBorder.none,
+                          focusedErrorBorder: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 0,
+                            vertical: 8,
+                          ),
+                        ),
+                        style: const TextStyle(
+                          color: Color(0xFF111111),
+                          fontSize: 14,
+                          height: 1.35,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Obx(() {
+                    final enabled = !isSubmitting.value;
+
+                    return TextButton(
+                      onPressed: enabled ? onSubmit : null,
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 8,
+                        ),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: Text(
+                        isEditing ? '수정' : '등록',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                          color: enabled
+                              ? const Color(0xFF875646)
+                              : const Color(0xFFB6A79F),
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// END_OF_FILE: lib/features/community/view/community_thread_screen.dart
+
+================================================
+FILE_PATH: lib/features/community/controller/comment_controller.dart
+================================================
+import 'dart:async';
+import 'dart:math';
+
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/auth_session_service.dart';
+import 'package:yupgagae/features/community/domain/comment.dart';
+import 'package:yupgagae/features/community/domain/industry_catalog.dart';
+import 'package:yupgagae/features/community/domain/post_repository.dart';
+import 'package:yupgagae/features/community/domain/region_catalog.dart';
+import 'package:yupgagae/features/my_store/domain/app_notification_item.dart';
+import 'package:yupgagae/features/my_store/domain/blocked_user_item.dart';
+import 'package:yupgagae/features/my_store/domain/store_profile.dart';
+import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart';
+
+class CommentViewItem {
+  final Comment comment;
+  final int depth;
+
+  const CommentViewItem({
+    required this.comment,
+    required this.depth,
+  });
+}
+
+class CommentController extends GetxController {
+  static const int maxCommentLength = 300;
+  static const int replyPreviewSize = 5;
+
+  final PostRepository repo;
+  final StoreProfileRepository storeProfileRepo;
+  final AuthSessionService auth;
+
+  CommentController({
+    required this.repo,
+    required this.storeProfileRepo,
+    required this.auth,
+  });
+
+  final comments = <Comment>[].obs;
+  final flattenedComments = <CommentViewItem>[].obs;
+
+  final isLoading = false.obs;
+  final isSubmitting = false.obs;
+  final error = RxnString();
+
+  final activeEditingId = RxnString();
+
+  // 중요:
+  // 기존 View가 activeReplyTo.value를 String처럼 사용한다.
+  // 따라서 Comment가 아니라 String commentId로 유지한다.
+  final activeReplyTo = RxnString();
+
+  String? _postId;
+  bool _didInitialize = false;
+
+  final _blockedCache = <String>{};
+  final _commentById = <String, Comment>{};
+  final _repliesByRoot = <String, List<Comment>>{};
+  final _rootIds = <String>{};
+
+  final _visibleReplyLimitByRoot = <String, int>{};
+
+  _AuthorSnapshot? _cachedAuthor;
+  Future<_AuthorSnapshot>? _authorSnapshotFuture;
+
+  String get currentUserId => auth.currentUserId;
+
+  String get postId => _postId ?? '';
+
+  bool get isReady {
+    final id = _postId;
+    return id != null && id.trim().isNotEmpty;
+  }
+
+  int get activeCommentCount {
+    return comments.where((c) {
+      return !c.isDeleted && !c.isReportThresholdReached;
+    }).length;
+  }
+
+  int totalReplyCountOf(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return 0;
+
+    return (_repliesByRoot[rootId] ?? const <Comment>[])
+        .where((comment) {
+          return !comment.isDeleted && !comment.isReportThresholdReached;
+        })
+        .length;
+  }
+
+  int visibleReplyCountOf(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return 0;
+
+    final total = totalReplyCountOf(rootId);
+    final limit = _visibleReplyLimitByRoot[rootId] ?? replyPreviewSize;
+
+    return min(limit, total);
+  }
+
+  int hiddenReplyCountOf(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return 0;
+
+    final hidden = totalReplyCountOf(rootId) - visibleReplyCountOf(rootId);
+    return hidden < 0 ? 0 : hidden;
+  }
+
+  bool hasMoreReplies(String rootCommentId) {
+    return hiddenReplyCountOf(rootCommentId) > 0;
+  }
+
+  void showMoreReplies(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return;
+    if (!hasMoreReplies(rootId)) return;
+
+    final currentLimit = _visibleReplyLimitByRoot[rootId] ?? replyPreviewSize;
+    final total = totalReplyCountOf(rootId);
+
+    _visibleReplyLimitByRoot[rootId] = min(
+      currentLimit + replyPreviewSize,
+      total,
+    );
+
+    _rebuildFlattenedOnly();
+  }
+
+  Future<void> initialize(String postId) async {
+    final normalized = postId.trim();
+
+    if (normalized.isEmpty) {
+      error.value = 'postId required';
+      return;
+    }
+
+    if (_didInitialize && _postId == normalized) {
+      await _prewarmAuthorSnapshot();
+      return;
+    }
+
+    _postId = normalized;
+    _didInitialize = true;
+    _visibleReplyLimitByRoot.clear();
+
+    await _loadBlockedCache();
+
+    // 댓글 목록 로딩과 작성자 스냅샷 예열을 병렬로 시작한다.
+    // 목적:
+    // - 상세 진입 로딩 시간을 불필요하게 늘리지 않음
+    // - initialize 완료 시점에는 _cachedAuthor가 준비되도록 보장
+    // - 첫 댓글/답글 작성 순간에 fetchProfile()이 처음 터지는 상황 방지
+    final authorWarmUpFuture = _prewarmAuthorSnapshot();
+
+    await load();
+    await authorWarmUpFuture;
+  }
+
+  Future<void> load() async {
+    if (!isReady) {
+      error.value = 'postId required';
+      return;
+    }
+
+    if (isLoading.value) return;
+
+    isLoading.value = true;
+    error.value = null;
+
+    try {
+      final list = await repo.fetchComments(postId);
+      _applyComments(list);
+    } catch (e) {
+      error.value = e.toString();
+      _clearCommentState();
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  @override
+  void refresh() {
+    unawaited(load());
+  }
+
+  Future<void> reload() async {
+    await load();
+  }
+
+  Future<void> _loadBlockedCache() async {
+    try {
+      final List<BlockedUserItem> blocked =
+          await storeProfileRepo.getBlockedUsers();
+
+      _blockedCache
+        ..clear()
+        ..addAll(
+          blocked.map((e) => e.userId.trim()).where((e) => e.isNotEmpty),
+        );
+    } catch (_) {
+      _blockedCache.clear();
+    }
+  }
+
+  Future<void> _prewarmAuthorSnapshot() async {
+    try {
+      await _getAuthorSnapshot();
+    } catch (_) {}
+  }
+
+  Future<_AuthorSnapshot> _getAuthorSnapshot() async {
+    final cached = _cachedAuthor;
+    if (cached != null) return cached;
+
+    final inFlight = _authorSnapshotFuture;
+    if (inFlight != null) return inFlight;
+
+    final future = _loadAuthorSnapshot();
+
+    _authorSnapshotFuture = future;
+
+    try {
+      final snapshot = await future;
+      _cachedAuthor = snapshot;
+      return snapshot;
+    } catch (_) {
+      final fallback = _AuthorSnapshot.fallback(currentUserId);
+      _cachedAuthor = fallback;
+      return fallback;
+    } finally {
+      if (_authorSnapshotFuture == future) {
+        _authorSnapshotFuture = null;
+      }
+    }
+  }
+
+  Future<_AuthorSnapshot> _loadAuthorSnapshot() async {
+    final StoreProfile profile = await storeProfileRepo.fetchProfile();
+
+    final nickname = profile.nickname.trim().isEmpty
+        ? '익명'
+        : profile.nickname.trim();
+
+    String? industryId;
+    final profileIndustry = profile.industry.trim();
+
+    if (profileIndustry.isNotEmpty) {
+      for (final item in IndustryCatalog.ordered()) {
+        if (item.name == profileIndustry || item.id == profileIndustry) {
+          industryId = item.id;
+          break;
+        }
+      }
+    }
+
+    return _AuthorSnapshot(
+      authorId: currentUserId,
+      authorLabel: nickname,
+      industryId: industryId,
+      locationLabel: RegionCatalog.normalize(profile.region),
+      isOwnerVerified: profile.isOwnerVerified,
+    );
+  }
+
+  _AuthorSnapshot _authorSnapshotForFastSubmit() {
+    final cached = _cachedAuthor;
+    if (cached != null) return cached;
+
+    return _AuthorSnapshot.fallback(currentUserId);
+  }
+
+  void clearAuthorCache() {
+    _cachedAuthor = null;
+    _authorSnapshotFuture = null;
+    unawaited(_prewarmAuthorSnapshot());
+  }
+
+  String _normalizeInputText(String text) {
+    return text.trim();
+  }
+
+  void _ensureValidCommentText({
+    required String text,
+    required String emptyMessage,
+  }) {
+    final normalized = _normalizeInputText(text);
+
+    if (normalized.isEmpty) {
+      throw Exception(emptyMessage);
+    }
+
+    if (normalized.length > maxCommentLength) {
+      throw Exception('댓글은 $maxCommentLength자 이내로 입력해주세요.');
+    }
+  }
+
+  bool _isVisibleComment(Comment comment) {
+    return !_blockedCache.contains(comment.authorId.trim());
+  }
+
+  bool _isLocalCommentId(String id) {
+    return id.startsWith('local_comment_') || id.startsWith('local_reply_');
+  }
+
+  String _makeLocalId(String prefix) {
+    return '${prefix}_${DateTime.now().microsecondsSinceEpoch}_$currentUserId';
+  }
+
+  void _clearCommentState() {
+    comments.clear();
+    flattenedComments.clear();
+    _commentById.clear();
+    _repliesByRoot.clear();
+    _rootIds.clear();
+    _visibleReplyLimitByRoot.clear();
+  }
+
+  void _applyComments(List<Comment> next) {
+    final visibleSorted = next.where(_isVisibleComment).toList(growable: false)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    _rebuildIndexes(visibleSorted);
+    _pruneReplyPaginationState();
+
+    comments.assignAll(visibleSorted);
+    flattenedComments.assignAll(_flattenForViewFromIndexes(visibleSorted));
+  }
+
+  void _rebuildIndexes(List<Comment> visibleSorted) {
+    _commentById
+      ..clear()
+      ..addEntries(
+        visibleSorted.map((comment) => MapEntry(comment.id, comment)),
+      );
+
+    _rootIds.clear();
+    _repliesByRoot.clear();
+
+    for (final comment in visibleSorted) {
+      final parentId = comment.parentId?.trim();
+
+      if (parentId == null || parentId.isEmpty) {
+        _rootIds.add(comment.id);
+        continue;
+      }
+
+      _repliesByRoot.putIfAbsent(parentId, () => <Comment>[]).add(comment);
+    }
+
+    for (final entry in _repliesByRoot.entries) {
+      entry.value.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    }
+  }
+
+  void _pruneReplyPaginationState() {
+    final validRootIds = _rootIds.toSet();
+
+    _visibleReplyLimitByRoot.removeWhere((key, value) {
+      return !validRootIds.contains(key);
+    });
+  }
+
+  List<CommentViewItem> _flattenForViewFromIndexes(List<Comment> visibleSorted) {
+    final out = <CommentViewItem>[];
+
+    for (final comment in visibleSorted) {
+      final parentId = comment.parentId?.trim();
+
+      if (parentId != null && parentId.isNotEmpty) {
+        continue;
+      }
+
+      out.add(CommentViewItem(comment: comment, depth: 0));
+
+      final replies = _repliesByRoot[comment.id] ?? const <Comment>[];
+      final visibleReplyLimit =
+          _visibleReplyLimitByRoot[comment.id] ?? replyPreviewSize;
+
+      final visibleReplies = replies
+          .where((reply) => !reply.isDeleted && !reply.isReportThresholdReached)
+          .take(visibleReplyLimit);
+
+      for (final reply in visibleReplies) {
+        out.add(CommentViewItem(comment: reply, depth: 1));
+      }
+    }
+
+    return out;
+  }
+
+  void _insertCommentFast(Comment comment) {
+    if (!_isVisibleComment(comment)) return;
+
+    comments.add(comment);
+    _commentById[comment.id] = comment;
+
+    final parentId = comment.parentId?.trim();
+
+    if (parentId == null || parentId.isEmpty) {
+      _rootIds.add(comment.id);
+      flattenedComments.add(CommentViewItem(comment: comment, depth: 0));
+      return;
+    }
+
+    final replies = _repliesByRoot.putIfAbsent(parentId, () => <Comment>[]);
+    replies.add(comment);
+    replies.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    final currentLimit = _visibleReplyLimitByRoot[parentId] ?? replyPreviewSize;
+    final total = totalReplyCountOf(parentId);
+
+    _visibleReplyLimitByRoot[parentId] = min(
+      max(currentLimit, visibleReplyCountOf(parentId) + 1),
+      total,
+    );
+
+    _rebuildFlattenedOnly();
+  }
+
+  void _replaceComment(Comment updated) {
+    if (!_isVisibleComment(updated)) {
+      _removeCommentById(updated.id);
+      return;
+    }
+
+    final listIndex = comments.indexWhere((e) => e.id == updated.id);
+    if (listIndex >= 0) {
+      comments[listIndex] = updated;
+    } else {
+      comments.add(updated);
+    }
+
+    _commentById[updated.id] = updated;
+
+    final parentId = updated.parentId?.trim();
+
+    if (parentId == null || parentId.isEmpty) {
+      _rootIds.add(updated.id);
+    } else {
+      final replies = _repliesByRoot.putIfAbsent(parentId, () => <Comment>[]);
+      final replyIndex = replies.indexWhere((e) => e.id == updated.id);
+
+      if (replyIndex >= 0) {
+        replies[replyIndex] = updated;
+      } else {
+        replies.add(updated);
+      }
+
+      replies.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    }
+
+    final flatIndex = flattenedComments.indexWhere(
+      (item) => item.comment.id == updated.id,
+    );
+    if (flatIndex >= 0) {
+      flattenedComments[flatIndex] = CommentViewItem(
+        comment: updated,
+        depth: flattenedComments[flatIndex].depth,
+      );
+    } else if (listIndex < 0) {
+      _rebuildFlattenedOnly();
+    }
+  }
+
+  void _replaceLocalComment({
+    required String localId,
+    required Comment realComment,
+  }) {
+    final listIndex = comments.indexWhere((e) => e.id == localId);
+
+    if (listIndex >= 0) {
+      comments[listIndex] = realComment;
+    } else {
+      comments.add(realComment);
+    }
+
+    _commentById.remove(localId);
+    _commentById[realComment.id] = realComment;
+
+    final parentId = realComment.parentId?.trim();
+
+    if (parentId == null || parentId.isEmpty) {
+      _rootIds.remove(localId);
+      _rootIds.add(realComment.id);
+    } else {
+      final replies = _repliesByRoot[parentId];
+
+      if (replies != null) {
+        final replyIndex = replies.indexWhere((e) => e.id == localId);
+        if (replyIndex >= 0) {
+          replies[replyIndex] = realComment;
+        } else {
+          replies.add(realComment);
+        }
+
+        replies.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      } else {
+        _repliesByRoot[parentId] = <Comment>[realComment];
+      }
+    }
+
+    final flatIndex = flattenedComments.indexWhere(
+      (item) => item.comment.id == localId,
+    );
+    if (flatIndex >= 0) {
+      flattenedComments[flatIndex] = CommentViewItem(
+        comment: realComment,
+        depth: flattenedComments[flatIndex].depth,
+      );
+    } else {
+      _rebuildFlattenedOnly();
+    }
+  }
+
+  void _removeCommentById(String commentId) {
+    comments.removeWhere((e) => e.id == commentId);
+    _commentById.remove(commentId);
+    _rootIds.remove(commentId);
+
+    for (final replies in _repliesByRoot.values) {
+      replies.removeWhere((e) => e.id == commentId);
+    }
+
+    _rebuildFlattenedOnly();
+  }
+
+  void _rebuildFlattenedOnly() {
+    final visibleSorted = comments.where(_isVisibleComment).toList(growable: false)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    _rebuildIndexes(visibleSorted);
+    _pruneReplyPaginationState();
+
+    comments.assignAll(visibleSorted);
+    flattenedComments.assignAll(_flattenForViewFromIndexes(visibleSorted));
+  }
+
+  Future<Comment> submit(String text) async {
+    return add(text);
+  }
+
+  Future<Comment> add(String text) async {
+    return addComment(text);
+  }
+
+  Future<Comment> addComment(String text) async {
+    if (!isReady) {
+      throw Exception('postId required');
+    }
+
+    _ensureValidCommentText(
+      text: text,
+      emptyMessage: '댓글을 입력하세요.',
+    );
+
+    final normalizedText = _normalizeInputText(text);
+
+    if (isSubmitting.value) {
+      throw Exception('댓글 등록 중입니다.');
+    }
+
+    isSubmitting.value = true;
+    error.value = null;
+
+    final author = _authorSnapshotForFastSubmit();
+    final localId = _makeLocalId('local_comment');
+
+    final localComment = Comment(
+      id: localId,
+      postId: postId,
+      parentId: null,
+      authorId: author.authorId,
+      authorLabel: author.authorLabel,
+      isOwnerVerified: author.isOwnerVerified,
+      industryId: author.industryId,
+      locationLabel: author.locationLabel,
+      text: normalizedText,
+      createdAt: DateTime.now(),
+      likeCount: 0,
+      likedUserIds: <String>{},
+      reportCount: 0,
+      reportedUserIds: <String>{},
+      isReportThresholdReached: false,
+      isDeleted: false,
+    );
+
+    _insertCommentFast(localComment);
+
+    try {
+      final created = await repo.addComment(
+        postId: postId,
+        text: normalizedText,
+      );
+
+      _replaceLocalComment(
+        localId: localId,
+        realComment: created,
+      );
+
+      unawaited(
+        _notifyPostAuthorForComment(createdComment: created),
+      );
+
+      return created;
+    } catch (e) {
+      error.value = e.toString();
+      _removeCommentById(localId);
+      rethrow;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  Future<Comment> reply({
+    required String parentCommentId,
+    required String text,
+  }) async {
+    return addReply(
+      parentCommentId: parentCommentId,
+      text: text,
+    );
+  }
+
+  Future<Comment> addReply({
+    required String parentCommentId,
+    required String text,
+  }) async {
+    if (!isReady) {
+      throw Exception('postId required');
+    }
+
+    final tappedTarget = commentById(parentCommentId.trim());
+    final rootParentId = resolveReplyRootId(parentCommentId.trim());
+
+    if (rootParentId.trim().isEmpty) {
+      throw Exception('답글을 달 댓글을 찾을 수 없습니다.');
+    }
+
+    _ensureValidCommentText(
+      text: text,
+      emptyMessage: '답글을 입력하세요.',
+    );
+
+    final normalizedText = _normalizeInputText(text);
+
+    if (isSubmitting.value) {
+      throw Exception('답글 등록 중입니다.');
+    }
+
+    isSubmitting.value = true;
+    error.value = null;
+
+    final author = _authorSnapshotForFastSubmit();
+    final localId = _makeLocalId('local_reply');
+
+    final localReply = Comment(
+      id: localId,
+      postId: postId,
+      parentId: rootParentId,
+      authorId: author.authorId,
+      authorLabel: author.authorLabel,
+      isOwnerVerified: author.isOwnerVerified,
+      industryId: author.industryId,
+      locationLabel: author.locationLabel,
+      text: normalizedText,
+      createdAt: DateTime.now(),
+      likeCount: 0,
+      likedUserIds: <String>{},
+      reportCount: 0,
+      reportedUserIds: <String>{},
+      isReportThresholdReached: false,
+      isDeleted: false,
+    );
+
+    _insertCommentFast(localReply);
+
+    try {
+      final created = await repo.addReply(
+        postId: postId,
+        parentCommentId: rootParentId,
+        text: normalizedText,
+      );
+
+      final normalizedCreated = created.copyWith(parentId: rootParentId);
+
+      _replaceLocalComment(
+        localId: localId,
+        realComment: normalizedCreated,
+      );
+
+      if (tappedTarget != null) {
+        unawaited(
+          _notifyCommentAuthorForReply(
+            targetComment: tappedTarget,
+            createdReply: normalizedCreated,
+          ),
+        );
+      }
+
+      return normalizedCreated;
+    } catch (e) {
+      error.value = e.toString();
+      _removeCommentById(localId);
+      rethrow;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  Future<Comment> toggleLike(dynamic target) async {
+    if (!isReady) {
+      throw Exception('postId required');
+    }
+
+    final commentId = _commentIdFromTarget(target);
+    if (commentId == null || commentId.isEmpty) {
+      throw Exception('댓글을 찾을 수 없습니다.');
+    }
+
+    if (_isLocalCommentId(commentId)) {
+      final current = commentById(commentId);
+      if (current == null) {
+        throw Exception('댓글을 찾을 수 없습니다.');
+      }
+      return current;
+    }
+
+    final before = commentById(commentId);
+
+    if (before == null) {
+      throw Exception('댓글을 찾을 수 없습니다.');
+    }
+
+    error.value = null;
+
+    try {
+      final updated = await repo.toggleCommentLike(
+        postId: postId,
+        commentId: commentId,
+      );
+
+      _replaceComment(updated);
+
+      unawaited(
+        _notifyCommentAuthorForLike(
+          before: before,
+          after: updated,
+        ),
+      );
+
+      return updated;
+    } catch (e) {
+      error.value = e.toString();
+      rethrow;
+    }
+  }
+
+  Future<Comment> toggleLikeOnComment(Comment comment) async {
+    return toggleLike(comment);
+  }
+
+  Future<void> delete(dynamic target) async {
+    if (!isReady) return;
+
+    final commentId = _commentIdFromTarget(target);
+    if (commentId == null || commentId.isEmpty) return;
+
+    if (_isLocalCommentId(commentId)) {
+      _removeCommentById(commentId);
+      return;
+    }
+
+    error.value = null;
+
+    try {
+      await repo.deleteComment(
+        postId: postId,
+        commentId: commentId,
+      );
+
+      final current = commentById(commentId);
+      if (current == null || current.isDeleted) return;
+
+      _replaceComment(
+        current.copyWith(
+          text: '삭제된 댓글입니다.',
+          isDeleted: true,
+        ),
+      );
+    } catch (e) {
+      error.value = e.toString();
+      rethrow;
+    }
+  }
+
+  Future<void> deleteComment(String commentId) async {
+    await delete(commentId);
+  }
+
+  Future<void> report({
+    String? commentId,
+    Comment? comment,
+    required String reason,
+  }) async {
+    if (!isReady) return;
+
+    final targetId = commentId?.trim().isNotEmpty == true
+        ? commentId!.trim()
+        : comment?.id.trim();
+
+    if (targetId == null || targetId.isEmpty) {
+      throw Exception('댓글을 찾을 수 없습니다.');
+    }
+
+    if (_isLocalCommentId(targetId)) return;
+
+    final normalizedReason = reason.trim();
+
+    if (normalizedReason.isEmpty) {
+      throw Exception('신고 사유를 선택하세요.');
+    }
+
+    error.value = null;
+
+    try {
+      await repo.reportComment(
+        postId: postId,
+        commentId: targetId,
+        reason: normalizedReason,
+      );
+
+      final current = commentById(targetId);
+      if (current == null) return;
+      if (current.isDeleted) return;
+      if (current.reportedUserIds.contains(currentUserId)) return;
+
+      final reporters = Set<String>.from(current.reportedUserIds)
+        ..add(currentUserId);
+      final newCount = current.reportCount + 1;
+
+      _replaceComment(
+        current.copyWith(
+          reportedUserIds: reporters,
+          reportCount: newCount,
+          isReportThresholdReached:
+              current.isReportThresholdReached || newCount >= 3,
+        ),
+      );
+    } catch (e) {
+      error.value = e.toString();
+      rethrow;
+    }
+  }
+
+  Future<void> reportComment({
+    required String commentId,
+    required String reason,
+  }) async {
+    await report(
+      commentId: commentId,
+      reason: reason,
+    );
+  }
+
+  Future<Comment> updateComment({
+    required String commentId,
+    required String text,
+  }) async {
+    if (!isReady) {
+      throw Exception('postId required');
+    }
+
+    if (_isLocalCommentId(commentId)) {
+      throw Exception('잠시 후 다시 시도해주세요.');
+    }
+
+    _ensureValidCommentText(
+      text: text,
+      emptyMessage: '수정할 내용을 입력하세요.',
+    );
+
+    final normalizedText = _normalizeInputText(text);
+
+    if (isSubmitting.value) {
+      throw Exception('댓글 수정 중입니다.');
+    }
+
+    isSubmitting.value = true;
+    error.value = null;
+
+    try {
+      final updated = await repo.updateComment(
+        postId: postId,
+        commentId: commentId,
+        text: normalizedText,
+      );
+
+      _replaceComment(updated);
+      return updated;
+    } catch (e) {
+      error.value = e.toString();
+      rethrow;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  Future<bool> canDelete(dynamic target) async {
+    if (!isReady) return false;
+
+    final commentId = _commentIdFromTarget(target);
+    if (commentId == null || commentId.isEmpty) return false;
+
+    if (_isLocalCommentId(commentId)) {
+      final current = commentById(commentId);
+      return current?.authorId == currentUserId;
+    }
+
+    try {
+      return await repo.canDeleteComment(
+        postId: postId,
+        commentId: commentId,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> canDeleteComment(String commentId) async {
+    return canDelete(commentId);
+  }
+
+  Comment? commentById(String commentId) {
+    final id = commentId.trim();
+
+    if (id.isEmpty) return null;
+
+    return _commentById[id];
+  }
+
+  List<Comment> repliesOf(String rootCommentId) {
+    final id = rootCommentId.trim();
+
+    if (id.isEmpty) return const <Comment>[];
+
+    return List<Comment>.from(_repliesByRoot[id] ?? const <Comment>[]);
+  }
+
+  int replyCountOf(String rootCommentId) {
+    return repliesOf(rootCommentId).where((e) => !e.isDeleted).length;
+  }
+
+  int replyIndexOf({
+    required String rootCommentId,
+    required String replyId,
+  }) {
+    final rootId = rootCommentId.trim();
+    final targetId = replyId.trim();
+
+    if (rootId.isEmpty || targetId.isEmpty) return -1;
+
+    final replies = _repliesByRoot[rootId] ?? const <Comment>[];
+    return replies.indexWhere((comment) => comment.id == targetId);
+  }
+
+  List<Comment> rootComments() {
+    return comments.where((comment) {
+      final parentId = comment.parentId?.trim();
+      return parentId == null || parentId.isEmpty;
+    }).toList(growable: false);
+  }
+
+  String resolveReplyRootId(String commentId) {
+    return _rootCommentIdOf(commentId) ?? commentId.trim();
+  }
+
+  String? rootCommentIdOf(String commentId) {
+    return _rootCommentIdOf(commentId);
+  }
+
+  String? _rootCommentIdOf(String commentId) {
+    final id = commentId.trim();
+
+    if (id.isEmpty) return null;
+
+    final target = _commentById[id];
+
+    if (target == null) return id;
+
+    final parentId = target.parentId?.trim();
+
+    if (parentId == null || parentId.isEmpty) {
+      return target.id;
+    }
+
+    return parentId;
+  }
+
+  bool isLikedByMe(Comment comment) {
+    return comment.likedUserIds.contains(currentUserId);
+  }
+
+  bool isMine(Comment comment) {
+    return comment.authorId == currentUserId;
+  }
+
+  void startReply(Comment comment) {
+    activeReplyTo.value = comment.id;
+    activeEditingId.value = null;
+  }
+
+  void startReplyById(String commentId) {
+    final id = commentId.trim();
+    activeReplyTo.value = id.isEmpty ? null : id;
+    activeEditingId.value = null;
+  }
+
+  void startEdit(Comment comment) {
+    activeEditingId.value = comment.id;
+    activeReplyTo.value = null;
+  }
+
+  void startEditById(String commentId) {
+    final id = commentId.trim();
+    activeEditingId.value = id.isEmpty ? null : id;
+    activeReplyTo.value = null;
+  }
+
+  void cancelComposeMode() {
+    activeEditingId.value = null;
+    activeReplyTo.value = null;
+  }
+
+  void clearActiveModes() {
+    cancelComposeMode();
+  }
+
+  void clear() {
+    _postId = null;
+    _didInitialize = false;
+    _cachedAuthor = null;
+    _authorSnapshotFuture = null;
+    _visibleReplyLimitByRoot.clear();
+
+    activeEditingId.value = null;
+    activeReplyTo.value = null;
+
+    _clearCommentState();
+
+    error.value = null;
+    isLoading.value = false;
+    isSubmitting.value = false;
+  }
+
+  String? _commentIdFromTarget(dynamic target) {
+    if (target == null) return null;
+
+    if (target is String) {
+      return target.trim();
+    }
+
+    if (target is Comment) {
+      return target.id.trim();
+    }
+
+    return target.toString().trim();
+  }
+
+  Future<void> _notifyPostAuthorForComment({
+    required Comment createdComment,
+  }) async {
+    if (createdComment.authorId == currentUserId) return;
+
+    try {
+      final post = await repo.getPostById(postId);
+
+      if (post.authorId == currentUserId) return;
+      if (post.authorId.trim().isEmpty) return;
+
+      final StoreProfile myProfile = await storeProfileRepo.fetchProfile();
+      final nickname = myProfile.nickname.trim().isEmpty
+          ? '익명'
+          : myProfile.nickname.trim();
+
+      await storeProfileRepo.addNotificationToUser(
+        post.authorId,
+        AppNotificationItem(
+          id: 'comment_${post.id}_${createdComment.id}_${DateTime.now().microsecondsSinceEpoch}',
+          type: 'post_comment',
+          message: '$nickname님이 회원님의 글에 댓글을 남겼습니다.',
+          targetUserId: post.authorId,
+          targetPostId: post.id,
+          targetCommentId: createdComment.id,
+          isRead: false,
+          createdAt: DateTime.now(),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _notifyCommentAuthorForReply({
+    required Comment targetComment,
+    required Comment createdReply,
+  }) async {
+    if (targetComment.authorId == currentUserId) return;
+    if (targetComment.authorId.trim().isEmpty) return;
+
+    try {
+      final StoreProfile myProfile = await storeProfileRepo.fetchProfile();
+      final nickname = myProfile.nickname.trim().isEmpty
+          ? '익명'
+          : myProfile.nickname.trim();
+
+      await storeProfileRepo.addNotificationToUser(
+        targetComment.authorId,
+        AppNotificationItem(
+          id: 'reply_${targetComment.id}_${createdReply.id}_${DateTime.now().microsecondsSinceEpoch}',
+          type: 'comment_reply',
+          message: '$nickname님이 회원님의 댓글에 답글을 남겼습니다.',
+          targetUserId: targetComment.authorId,
+          targetPostId: postId,
+          targetCommentId: createdReply.id,
+          isRead: false,
+          createdAt: DateTime.now(),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _notifyCommentAuthorForLike({
+    required Comment before,
+    required Comment after,
+  }) async {
+    if (after.authorId == currentUserId) return;
+    if (after.authorId.trim().isEmpty) return;
+
+    final wasLiked = before.likedUserIds.contains(currentUserId);
+    final isLiked = after.likedUserIds.contains(currentUserId);
+
+    if (wasLiked || !isLiked) return;
+
+    try {
+      final StoreProfile myProfile = await storeProfileRepo.fetchProfile();
+      final nickname = myProfile.nickname.trim().isEmpty
+          ? '익명'
+          : myProfile.nickname.trim();
+
+      await storeProfileRepo.addNotificationToUser(
+        after.authorId,
+        AppNotificationItem(
+          id: 'comment_like_${after.id}_${currentUserId}_${DateTime.now().microsecondsSinceEpoch}',
+          type: 'comment_like',
+          message: '$nickname님이 회원님의 댓글을 좋아합니다.',
+          targetUserId: after.authorId,
+          targetPostId: postId,
+          targetCommentId: after.id,
+          isRead: false,
+          createdAt: DateTime.now(),
+        ),
+      );
+    } catch (_) {}
+  }
+}
+
+class _AuthorSnapshot {
+  final String authorId;
+  final String authorLabel;
+  final String? industryId;
+  final String? locationLabel;
+  final bool isOwnerVerified;
+
+  const _AuthorSnapshot({
+    required this.authorId,
+    required this.authorLabel,
+    required this.industryId,
+    required this.locationLabel,
+    required this.isOwnerVerified,
+  });
+
+  factory _AuthorSnapshot.fallback(String userId) {
+    return _AuthorSnapshot(
+      authorId: userId,
+      authorLabel: '익명',
+      industryId: null,
+      locationLabel: null,
+      isOwnerVerified: false,
+    );
+  }
+}
+
+// END_OF_FILE: lib/features/community/controller/comment_controller.dart
+
+--- FILE NOT FOUND: lib/features/community/view/widgets/comment_input_bar.dart ---
+
+--- FILE NOT FOUND: lib/features/community/view/widgets/comment_list_section.dart ---
+
+--- FILE NOT FOUND: lib/features/community/view/widgets/comment_item.dart ---

@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/image/app_image_provider_resolver.dart';
 import 'package:yupgagae/features/community/controller/post_list_controller.dart';
 import 'package:yupgagae/features/community/domain/industry_catalog.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
@@ -265,13 +265,14 @@ class _FreeBoardFeedScreenState extends State<FreeBoardFeedScreen> {
     if (!mounted || post.imagePaths.isEmpty) return;
 
     for (final path in post.imagePaths) {
-      if (path.trim().isEmpty) continue;
+      final provider = AppImageProviderResolver.resolve(
+        path,
+        resizeWidth: 960,
+      );
+
+      if (provider == null) continue;
 
       try {
-        final provider = ResizeImage(
-          FileImage(File(path)),
-          width: 960,
-        );
         await precacheImage(provider, context);
       } catch (_) {}
     }

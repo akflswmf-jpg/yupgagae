@@ -151,23 +151,43 @@ class PostDetailBody extends StatelessWidget {
 
             return RepaintBoundary(
               key: ValueKey(item.comment.id),
-              child: PostDetailCommentItem(
-                item: item,
-                timeLabel: timeLabel,
-                currentUserId: commentC.currentUserId,
-                activeReplyId: activeReplyId,
-                activeEditingId: activeEditingId,
-                onReportComment: onReport,
-                onReplyTap: (cm) async {
-                  await onReplyTap(cm.id);
-                },
-                onEditTap: (cm) async {
-                  await onEditTap(cm.id, cm.text);
-                },
-                onDeleteTap: onDelete,
-                onToggleLikeTap: (cm) async {
-                  await commentC.toggleLike(cm.id);
-                },
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PostDetailCommentItem(
+                    item: item,
+                    timeLabel: timeLabel,
+                    currentUserId: commentC.currentUserId,
+                    activeReplyId: activeReplyId,
+                    activeEditingId: activeEditingId,
+                    onReportComment: onReport,
+                    onReplyTap: (cm) async {
+                      await onReplyTap(cm.id);
+                    },
+                    onEditTap: (cm) async {
+                      await onEditTap(cm.id, cm.text);
+                    },
+                    onDeleteTap: onDelete,
+                    onToggleLikeTap: (cm) async {
+                      await commentC.toggleLike(cm.id);
+                    },
+                  ),
+                  if (_shouldShowReplyMoreButton(
+                    item: item,
+                    items: items,
+                    itemIndex: index,
+                  ))
+                    _MoreRepliesButton(
+                      hiddenCount: commentC.hiddenReplyCountOf(
+                        item.comment.parentId ?? '',
+                      ),
+                      onTap: () {
+                        final parentId = item.comment.parentId?.trim();
+                        if (parentId == null || parentId.isEmpty) return;
+                        commentC.showMoreReplies(parentId);
+                      },
+                    ),
+                ],
               ),
             );
           },
@@ -178,6 +198,27 @@ class PostDetailBody extends StatelessWidget {
         ),
       );
     });
+  }
+
+  bool _shouldShowReplyMoreButton({
+    required CommentViewItem item,
+    required List<CommentViewItem> items,
+    required int itemIndex,
+  }) {
+    if (item.depth != 1) return false;
+
+    final parentId = item.comment.parentId?.trim();
+    if (parentId == null || parentId.isEmpty) return false;
+
+    if (!commentC.hasMoreReplies(parentId)) return false;
+
+    final nextIndex = itemIndex + 1;
+    if (nextIndex >= items.length) return true;
+
+    final next = items[nextIndex];
+    if (next.depth == 0) return true;
+
+    return false;
   }
 
   @override
@@ -204,6 +245,53 @@ class PostDetailBody extends StatelessWidget {
           child: SizedBox(height: 24),
         ),
       ],
+    );
+  }
+}
+
+class _MoreRepliesButton extends StatelessWidget {
+  final int hiddenCount;
+  final VoidCallback onTap;
+
+  const _MoreRepliesButton({
+    required this.hiddenCount,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final countText = hiddenCount > CommentController.replyPreviewSize
+        ? '${CommentController.replyPreviewSize}개'
+        : '$hiddenCount개';
+
+    return Container(
+      width: double.infinity,
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(48, 6, 16, 12),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: onTap,
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 5),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: const Icon(
+            Icons.subdirectory_arrow_right_rounded,
+            size: 15,
+            color: Color(0xFFA56E5F),
+          ),
+          label: Text(
+            '답글 $countText 더보기',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFFA56E5F),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

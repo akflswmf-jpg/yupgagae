@@ -5,7 +5,8 @@ import 'package:get/get.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
+import 'package:yupgagae/core/image/app_image_provider_resolver.dart';
 import 'package:yupgagae/features/community/domain/industry_catalog.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
@@ -22,7 +23,7 @@ class WritePostController extends GetxController {
   static const int _uploadQuality = 84;
 
   final PostRepository repo;
-  final AnonSessionService session;
+  final AuthSessionService auth;
   final StoreProfileRepository storeProfileRepo;
 
   final String? editingPostId;
@@ -30,7 +31,7 @@ class WritePostController extends GetxController {
 
   WritePostController({
     required this.repo,
-    required this.session,
+    required this.auth,
     required this.storeProfileRepo,
     this.editingPostId,
     this.initialBoardType = BoardType.free,
@@ -50,7 +51,7 @@ class WritePostController extends GetxController {
 
   late BoardType _resolvedBoardType = initialBoardType;
 
-  String get currentUserId => session.anonId;
+  String get currentUserId => auth.currentUserId;
 
   bool get isEditMode => editingPostId != null && editingPostId!.isNotEmpty;
 
@@ -287,7 +288,12 @@ class WritePostController extends GetxController {
   }
 
   Future<String?> _compressSingleImage(String originalPath) async {
-    final originalFile = File(originalPath);
+    final source = originalPath.trim();
+
+    if (source.isEmpty) return null;
+    if (AppImageProviderResolver.isNetworkSource(source)) return source;
+
+    final originalFile = File(source);
     if (!await originalFile.exists()) return null;
 
     final tempDir = await getTemporaryDirectory();
@@ -296,7 +302,7 @@ class WritePostController extends GetxController {
 
     try {
       final compressed = await FlutterImageCompress.compressAndGetFile(
-        originalPath,
+        source,
         targetPath,
         quality: _uploadQuality,
         minWidth: _uploadLongSide,
@@ -306,24 +312,24 @@ class WritePostController extends GetxController {
       );
 
       if (compressed == null) {
-        return originalPath;
+        return source;
       }
 
       final compressedFile = File(compressed.path);
       if (!await compressedFile.exists()) {
-        return originalPath;
+        return source;
       }
 
       final originalLength = await originalFile.length();
       final compressedLength = await compressedFile.length();
 
       if (compressedLength >= originalLength) {
-        return originalPath;
+        return source;
       }
 
       return compressed.path;
     } catch (_) {
-      return originalPath;
+      return source;
     }
   }
 

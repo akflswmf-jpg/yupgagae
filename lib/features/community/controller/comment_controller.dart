@@ -1,8 +1,9 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/domain/comment.dart';
 import 'package:yupgagae/features/community/domain/industry_catalog.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
@@ -24,13 +25,16 @@ class CommentViewItem {
 
 class CommentController extends GetxController {
   static const int maxCommentLength = 300;
+  static const int replyPreviewSize = 5;
 
   final PostRepository repo;
   final StoreProfileRepository storeProfileRepo;
+  final AuthSessionService auth;
 
   CommentController({
     required this.repo,
     required this.storeProfileRepo,
+    required this.auth,
   });
 
   final comments = <Comment>[].obs;
@@ -55,15 +59,12 @@ class CommentController extends GetxController {
   final _repliesByRoot = <String, List<Comment>>{};
   final _rootIds = <String>{};
 
+  final _visibleReplyLimitByRoot = <String, int>{};
+
   _AuthorSnapshot? _cachedAuthor;
   Future<_AuthorSnapshot>? _authorSnapshotFuture;
 
-  AnonSessionService? get _session {
-    if (!Get.isRegistered<AnonSessionService>()) return null;
-    return Get.find<AnonSessionService>();
-  }
-
-  String get currentUserId => _session?.anonId ?? 'anon_local';
+  String get currentUserId => auth.currentUserId;
 
   String get postId => _postId ?? '';
 
@@ -76,6 +77,55 @@ class CommentController extends GetxController {
     return comments.where((c) {
       return !c.isDeleted && !c.isReportThresholdReached;
     }).length;
+  }
+
+  int totalReplyCountOf(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return 0;
+
+    return (_repliesByRoot[rootId] ?? const <Comment>[])
+        .where((comment) {
+          return !comment.isDeleted && !comment.isReportThresholdReached;
+        })
+        .length;
+  }
+
+  int visibleReplyCountOf(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return 0;
+
+    final total = totalReplyCountOf(rootId);
+    final limit = _visibleReplyLimitByRoot[rootId] ?? replyPreviewSize;
+
+    return min(limit, total);
+  }
+
+  int hiddenReplyCountOf(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return 0;
+
+    final hidden = totalReplyCountOf(rootId) - visibleReplyCountOf(rootId);
+    return hidden < 0 ? 0 : hidden;
+  }
+
+  bool hasMoreReplies(String rootCommentId) {
+    return hiddenReplyCountOf(rootCommentId) > 0;
+  }
+
+  void showMoreReplies(String rootCommentId) {
+    final rootId = rootCommentId.trim();
+    if (rootId.isEmpty) return;
+    if (!hasMoreReplies(rootId)) return;
+
+    final currentLimit = _visibleReplyLimitByRoot[rootId] ?? replyPreviewSize;
+    final total = totalReplyCountOf(rootId);
+
+    _visibleReplyLimitByRoot[rootId] = min(
+      currentLimit + replyPreviewSize,
+      total,
+    );
+
+    _rebuildFlattenedOnly();
   }
 
   Future<void> initialize(String postId) async {
@@ -93,6 +143,7 @@ class CommentController extends GetxController {
 
     _postId = normalized;
     _didInitialize = true;
+    _visibleReplyLimitByRoot.clear();
 
     await _loadBlockedCache();
 
@@ -217,9 +268,6 @@ class CommentController extends GetxController {
     final cached = _cachedAuthor;
     if (cached != null) return cached;
 
-    // 여기서 prewarm을 새로 발사하지 않는다.
-    // 첫 댓글/답글 시점에 fetchProfile()이 같이 터지면 키보드 dismiss,
-    // 로컬 댓글 삽입, 실제 댓글 교체와 충돌해 첫 등록 체감이 무거워질 수 있다.
     return _AuthorSnapshot.fallback(currentUserId);
   }
 
@@ -266,6 +314,7 @@ class CommentController extends GetxController {
     _commentById.clear();
     _repliesByRoot.clear();
     _rootIds.clear();
+    _visibleReplyLimitByRoot.clear();
   }
 
   void _applyComments(List<Comment> next) {
@@ -273,6 +322,7 @@ class CommentController extends GetxController {
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
     _rebuildIndexes(visibleSorted);
+    _pruneReplyPaginationState();
 
     comments.assignAll(visibleSorted);
     flattenedComments.assignAll(_flattenForViewFromIndexes(visibleSorted));
@@ -304,6 +354,14 @@ class CommentController extends GetxController {
     }
   }
 
+  void _pruneReplyPaginationState() {
+    final validRootIds = _rootIds.toSet();
+
+    _visibleReplyLimitByRoot.removeWhere((key, value) {
+      return !validRootIds.contains(key);
+    });
+  }
+
   List<CommentViewItem> _flattenForViewFromIndexes(List<Comment> visibleSorted) {
     final out = <CommentViewItem>[];
 
@@ -317,33 +375,19 @@ class CommentController extends GetxController {
       out.add(CommentViewItem(comment: comment, depth: 0));
 
       final replies = _repliesByRoot[comment.id] ?? const <Comment>[];
-      for (final reply in replies) {
+      final visibleReplyLimit =
+          _visibleReplyLimitByRoot[comment.id] ?? replyPreviewSize;
+
+      final visibleReplies = replies
+          .where((reply) => !reply.isDeleted && !reply.isReportThresholdReached)
+          .take(visibleReplyLimit);
+
+      for (final reply in visibleReplies) {
         out.add(CommentViewItem(comment: reply, depth: 1));
       }
     }
 
     return out;
-  }
-
-  int _flattenInsertIndexForReply(String rootCommentId) {
-    final rootIndex = flattenedComments.indexWhere(
-      (item) => item.comment.id == rootCommentId,
-    );
-
-    if (rootIndex < 0) {
-      return flattenedComments.length;
-    }
-
-    var insertIndex = rootIndex + 1;
-
-    while (insertIndex < flattenedComments.length) {
-      if (flattenedComments[insertIndex].depth == 0) {
-        break;
-      }
-      insertIndex++;
-    }
-
-    return insertIndex;
   }
 
   void _insertCommentFast(Comment comment) {
@@ -360,13 +404,19 @@ class CommentController extends GetxController {
       return;
     }
 
-    _repliesByRoot.putIfAbsent(parentId, () => <Comment>[]).add(comment);
+    final replies = _repliesByRoot.putIfAbsent(parentId, () => <Comment>[]);
+    replies.add(comment);
+    replies.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
-    final insertIndex = _flattenInsertIndexForReply(parentId);
-    flattenedComments.insert(
-      insertIndex,
-      CommentViewItem(comment: comment, depth: 1),
+    final currentLimit = _visibleReplyLimitByRoot[parentId] ?? replyPreviewSize;
+    final total = totalReplyCountOf(parentId);
+
+    _visibleReplyLimitByRoot[parentId] = min(
+      max(currentLimit, visibleReplyCountOf(parentId) + 1),
+      total,
     );
+
+    _rebuildFlattenedOnly();
   }
 
   void _replaceComment(Comment updated) {
@@ -401,7 +451,6 @@ class CommentController extends GetxController {
       replies.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     }
 
-    // 전체 리빌드 대신 해당 아이템만 교체 — 댓글 목록 전체 재빌드 방지
     final flatIndex = flattenedComments.indexWhere(
       (item) => item.comment.id == updated.id,
     );
@@ -411,7 +460,6 @@ class CommentController extends GetxController {
         depth: flattenedComments[flatIndex].depth,
       );
     } else if (listIndex < 0) {
-      // 목록에 없던 새 댓글이 추가된 경우에만 전체 리빌드
       _rebuildFlattenedOnly();
     }
   }
@@ -453,7 +501,6 @@ class CommentController extends GetxController {
       }
     }
 
-    // 전체 리빌드 대신 해당 아이템만 교체 — 댓글 100개 게시물에서 첫 댓글 1초 지연 방지
     final flatIndex = flattenedComments.indexWhere(
       (item) => item.comment.id == localId,
     );
@@ -462,8 +509,9 @@ class CommentController extends GetxController {
         comment: realComment,
         depth: flattenedComments[flatIndex].depth,
       );
+    } else {
+      _rebuildFlattenedOnly();
     }
-    // 낙관적 삽입 아이템이 없는 경우(차단된 사용자 등)는 그대로 유지
   }
 
   void _removeCommentById(String commentId) {
@@ -483,6 +531,7 @@ class CommentController extends GetxController {
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
     _rebuildIndexes(visibleSorted);
+    _pruneReplyPaginationState();
 
     comments.assignAll(visibleSorted);
     flattenedComments.assignAll(_flattenForViewFromIndexes(visibleSorted));
@@ -993,6 +1042,7 @@ class CommentController extends GetxController {
     _didInitialize = false;
     _cachedAuthor = null;
     _authorSnapshotFuture = null;
+    _visibleReplyLimitByRoot.clear();
 
     activeEditingId.value = null;
     activeReplyTo.value = null;

@@ -14,18 +14,20 @@ import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart'
 
 class InMemoryStoreProfileRepository implements StoreProfileRepository {
   static const String _profilesKey = 'my_store.multi_profiles_v1';
+  static const String _profilesBackupKey = 'my_store.multi_profiles_v1.backup';
+  static const String _profilesCorruptBackupKey =
+      'my_store.multi_profiles_v1.corrupt_backup';
 
   final AnonSessionService session;
 
   InMemoryStoreProfileRepository({
     required this.session,
   }) {
-    // 생성 즉시 SharedPreferences 로딩을 시작한다.
-    // fetchProfile() 호출 시점엔 이미 완료되어 있거나 in-flight future를 공유한다.
     _loadFuture = _loadFromPrefs();
   }
 
-  final Map<String, StoreProfile> _profiles = {};
+  final Map<String, StoreProfile> _profiles = <String, StoreProfile>{};
+
   bool _loaded = false;
   Future<void>? _loadFuture;
 
@@ -48,17 +50,24 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
       nickname: suffix.isEmpty ? '익명' : '익명-$suffix',
       region: '서울',
       industry: '미용/헤어',
-      isOwnerVerified: true,
-      isIdentityVerified: true,
+      isOwnerVerified: false,
+      isIdentityVerified: false,
       notificationsEnabled: true,
-      blockedUsers: const [],
-      notifications: const [],
+      blockedUsers: const <BlockedUserItem>[],
+      notifications: const <AppNotificationItem>[],
     );
   }
 
   Future<void> _ensureLoaded() async {
-    // 생성자에서 항상 _loadFuture를 set하므로 null 체크 불필요.
-    await _loadFuture;
+    final future = _loadFuture;
+    if (future != null) {
+      await future;
+    }
+
+    if (!_loaded) {
+      _loadFuture = _loadFromPrefs();
+      await _loadFuture;
+    }
   }
 
   Future<void> _loadFromPrefs() async {
@@ -69,31 +78,85 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
       final raw = prefs.getString(_profilesKey);
 
       if (raw != null && raw.trim().isNotEmpty) {
-        try {
-          final decodedProfiles = await compute(
-            _decodeStoreProfilesOnWorker,
-            raw,
-          );
+        final decodedProfiles = await compute(
+          _decodeStoreProfilesOnWorker,
+          raw,
+        );
 
+        if (decodedProfiles.isNotEmpty) {
           _profiles
             ..clear()
             ..addAll(decodedProfiles);
-        } catch (_) {
-          _profiles.clear();
-          shouldPersist = true;
+        } else {
+          await prefs.setString(_profilesCorruptBackupKey, raw);
+          _debugLog(
+            'profile decode returned empty. raw backed up to $_profilesCorruptBackupKey',
+          );
         }
       }
 
       if (!_profiles.containsKey(_me)) {
         _profiles[_me] = _defaultProfile(_me);
         shouldPersist = true;
+        _debugLog('default profile created for $_me');
       }
 
       if (shouldPersist) {
         await _persist();
       }
+    } catch (e, st) {
+      _debugLog('load failed: $e');
+      _debugLog('$st');
+
+      await _recoverAfterLoadFailure();
     } finally {
       _loaded = true;
+    }
+  }
+
+  Future<void> _recoverAfterLoadFailure() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_profilesKey);
+
+      if (raw != null && raw.trim().isNotEmpty) {
+        await prefs.setString(_profilesCorruptBackupKey, raw);
+      }
+
+      final backupRaw = prefs.getString(_profilesBackupKey);
+      if (backupRaw != null && backupRaw.trim().isNotEmpty) {
+        final decodedBackup = await compute(
+          _decodeStoreProfilesOnWorker,
+          backupRaw,
+        );
+
+        if (decodedBackup.isNotEmpty) {
+          _profiles
+            ..clear()
+            ..addAll(decodedBackup);
+
+          _debugLog('profile recovered from backup');
+
+          if (!_profiles.containsKey(_me)) {
+            _profiles[_me] = _defaultProfile(_me);
+            await _persist();
+          }
+
+          return;
+        }
+      }
+
+      if (!_profiles.containsKey(_me)) {
+        _profiles[_me] = _defaultProfile(_me);
+        await _persist();
+      }
+    } catch (e, st) {
+      _debugLog('recover failed: $e');
+      _debugLog('$st');
+
+      if (!_profiles.containsKey(_me)) {
+        _profiles[_me] = _defaultProfile(_me);
+      }
     }
   }
 
@@ -101,9 +164,17 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     _saveChain = _saveChain.then((_) async {
       final prefs = await SharedPreferences.getInstance();
 
+      final currentRaw = prefs.getString(_profilesKey);
+      if (currentRaw != null && currentRaw.trim().isNotEmpty) {
+        await prefs.setString(_profilesBackupKey, currentRaw);
+      }
+
       final payload = <String, dynamic>{};
-      _profiles.forEach((k, v) {
-        payload[k] = v.toJson();
+      _profiles.forEach((key, value) {
+        final safeKey = key.trim();
+        if (safeKey.isEmpty) return;
+
+        payload[safeKey] = value.toJson();
       });
 
       final encoded = await compute(
@@ -112,8 +183,9 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
       );
 
       await prefs.setString(_profilesKey, encoded);
-    }).catchError((_) {
-      // 로컬 저장 실패는 앱 흐름을 막지 않는다.
+    }).catchError((e, st) {
+      _debugLog('persist failed: $e');
+      _debugLog('$st');
     });
 
     await _saveChain;
@@ -138,7 +210,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
   List<AppNotificationItem> _sortedNotifications(List<AppNotificationItem> src) {
     final next = List<AppNotificationItem>.from(src)
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return next;
+    return List<AppNotificationItem>.unmodifiable(next);
   }
 
   List<BlockedUserItem> _normalizedBlockedUsers(List<BlockedUserItem> src) {
@@ -153,7 +225,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     final next = map.values.toList()
       ..sort((a, b) => b.blockedAt.compareTo(a.blockedAt));
 
-    return next;
+    return List<BlockedUserItem>.unmodifiable(next);
   }
 
   @override
@@ -251,6 +323,42 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
   }
 
   @override
+  Future<StoreProfile> updateIdentityVerified(bool verified) async {
+    await _ensureLoaded();
+
+    final p = _get(_me);
+    final updated = p.copyWith(
+      isIdentityVerified: verified,
+      isOwnerVerified: verified ? p.isOwnerVerified : false,
+    );
+
+    _profiles[_me] = updated;
+    await _persist();
+
+    return updated;
+  }
+
+  @override
+  Future<StoreProfile> updateOwnerVerified(bool verified) async {
+    await _ensureLoaded();
+
+    final p = _get(_me);
+
+    if (verified && !p.isIdentityVerified) {
+      throw Exception('본인인증 후 사업자 인증을 진행할 수 있습니다');
+    }
+
+    final updated = p.copyWith(
+      isOwnerVerified: verified,
+    );
+
+    _profiles[_me] = updated;
+    await _persist();
+
+    return updated;
+  }
+
+  @override
   Future<List<BlockedUserItem>> getBlockedUsers() async {
     await _ensureLoaded();
     return List<BlockedUserItem>.unmodifiable(_get(_me).blockedUsers);
@@ -272,9 +380,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
       ..insert(0, user.copyWith(userId: normalizedUserId));
 
     final updated = p.copyWith(
-      blockedUsers: List<BlockedUserItem>.unmodifiable(
-        _normalizedBlockedUsers(next),
-      ),
+      blockedUsers: _normalizedBlockedUsers(next),
     );
 
     _profiles[_me] = updated;
@@ -330,9 +436,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
       ..insert(0, item.copyWith(id: normalizedId));
 
     final updated = p.copyWith(
-      notifications: List<AppNotificationItem>.unmodifiable(
-        _sortedNotifications(next),
-      ),
+      notifications: _sortedNotifications(next),
     );
 
     _profiles[_me] = updated;
@@ -390,7 +494,9 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final p = _get(_me);
-    final updated = p.copyWith(notifications: const []);
+    final updated = p.copyWith(
+      notifications: const <AppNotificationItem>[],
+    );
 
     _profiles[_me] = updated;
     await _persist();
@@ -417,9 +523,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
       ..insert(0, item.copyWith(id: normalizedId));
 
     _profiles[normalizedUserId] = p.copyWith(
-      notifications: List<AppNotificationItem>.unmodifiable(
-        _sortedNotifications(next),
-      ),
+      notifications: _sortedNotifications(next),
     );
 
     await _persist();
@@ -438,6 +542,12 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
     return List<BlockedUserItem>.unmodifiable(_get(userId).blockedUsers);
   }
+
+  void _debugLog(String message) {
+    if (kDebugMode) {
+      debugPrint('[InMemoryStoreProfileRepository] $message');
+    }
+  }
 }
 
 String _encodeStoreProfilesOnWorker(Map<String, dynamic> payload) {
@@ -454,14 +564,18 @@ Map<String, StoreProfile> _decodeStoreProfilesOnWorker(String raw) {
   final profiles = <String, StoreProfile>{};
 
   decoded.forEach((key, value) {
-    final userId = key.toString().trim();
+    try {
+      final userId = key.toString().trim();
 
-    if (userId.isEmpty) return;
-    if (value is! Map) return;
+      if (userId.isEmpty) return;
+      if (value is! Map) return;
 
-    profiles[userId] = StoreProfile.fromJson(
-      Map<String, dynamic>.from(value),
-    );
+      profiles[userId] = StoreProfile.fromJson(
+        Map<String, dynamic>.from(value),
+      );
+    } catch (_) {
+      // 한 유저의 오래된/깨진 프로필 때문에 전체 프로필을 버리지 않는다.
+    }
   });
 
   return profiles;

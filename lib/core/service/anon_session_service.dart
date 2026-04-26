@@ -1,8 +1,10 @@
-import 'dart:math';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 class AnonSessionService {
   static const _kAnonIdKey = 'anon_id_v1';
+
+  static const Uuid _uuid = Uuid();
 
   final String _anonId;
 
@@ -12,7 +14,7 @@ class AnonSessionService {
 
   static Future<AnonSessionService> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final existing = prefs.getString(_kAnonIdKey);
+    final existing = prefs.getString(_kAnonIdKey)?.trim();
 
     if (existing != null && existing.isNotEmpty) {
       return AnonSessionService._(existing);
@@ -25,8 +27,6 @@ class AnonSessionService {
   }
 
   static String _generateAnonId() {
-    final r = Random();
-    final n = r.nextInt(1 << 31);
-    return 'anon_$n';
+    return 'anon_${_uuid.v4()}';
   }
 }

@@ -18,6 +18,8 @@ const Color kCommentHint = Color(0xFF9CA3AF);
 const Color kCommentText = Color(0xFF111111);
 const Color kYupgagaeSnackBg = Color(0xFF875646);
 
+const Duration kCommentSubmitMinimumDuration = Duration(milliseconds: 1000);
+
 class PostDetailScreen extends StatefulWidget {
   final String postId;
 
@@ -142,6 +144,11 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     _dismissKeyboard();
   }
 
+  Future<void> _paintSubmitOverlayBeforeWork() async {
+    await WidgetsBinding.instance.endOfFrame;
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+  }
+
   void _scrollToBottom({bool animated = false}) {
     if (!mounted || !_scrollController.hasClients) return;
 
@@ -176,8 +183,15 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     _commentCtrl.clear();
     _dismissKeyboardForSubmit();
 
+    final minimumSubmitFuture =
+        Future<void>.delayed(kCommentSubmitMinimumDuration);
+
     try {
+      await _paintSubmitOverlayBeforeWork();
+
       final createdComment = await commentC.add(text);
+
+      await minimumSubmitFuture;
 
       c.applyUpdatedCommentCount(commentC.activeCommentCount);
 
@@ -194,6 +208,8 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
       _showSnack('댓글을 등록했어요.');
     } catch (e) {
+      await minimumSubmitFuture;
+
       _commentCtrl.text = text;
       _commentCtrl.selection = TextSelection.fromPosition(
         TextPosition(offset: _commentCtrl.text.length),
@@ -651,6 +667,8 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                         timeLabel: _timeLabel,
                         onCommentTap: () {
                           if (!_commentBootDone) return;
+                          if (_isSubmittingLocal.value) return;
+
                           _commentFocusNode.requestFocus();
                           WidgetsBinding.instance.addPostFrameCallback((_) {
                             if (!mounted) return;
@@ -684,15 +702,30 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: _KeyboardInsetFollower(
-                  child: _BottomCommentBar(
-                    controller: _commentCtrl,
-                    focusNode: _commentFocusNode,
-                    isSubmitting: _isSubmittingLocal,
-                    isCommentReady: _commentBootDone,
-                    onSubmit: _submitComment,
-                  ),
-                ),
+                child: Obx(() {
+                  if (_isSubmittingLocal.value) {
+                    return const SizedBox.shrink();
+                  }
+
+                  return _KeyboardInsetFollower(
+                    child: _BottomCommentBar(
+                      controller: _commentCtrl,
+                      focusNode: _commentFocusNode,
+                      isSubmitting: _isSubmittingLocal,
+                      isCommentReady: _commentBootDone,
+                      onSubmit: _submitComment,
+                    ),
+                  );
+                }),
+              ),
+              Positioned.fill(
+                child: Obx(() {
+                  if (!_isSubmittingLocal.value) {
+                    return const SizedBox.shrink();
+                  }
+
+                  return const _CommentSubmitOverlay();
+                }),
               ),
             ],
           ),
@@ -717,6 +750,27 @@ class _KeyboardInsetFollower extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.only(bottom: bottom),
         child: child,
+      ),
+    );
+  }
+}
+
+class _CommentSubmitOverlay extends StatelessWidget {
+  const _CommentSubmitOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return const IgnorePointer(
+      ignoring: true,
+      child: Center(
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.6,
+            color: kCommentAccentDark,
+          ),
+        ),
       ),
     );
   }

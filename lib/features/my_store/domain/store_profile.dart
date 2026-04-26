@@ -49,10 +49,6 @@ class StoreProfile {
     );
   }
 
-  // =========================
-  // 🔥 JSON 직렬화 추가 (핵심)
-  // =========================
-
   Map<String, dynamic> toJson() {
     return {
       'nickname': nickname,
@@ -67,19 +63,80 @@ class StoreProfile {
   }
 
   factory StoreProfile.fromJson(Map<String, dynamic> json) {
+    final nickname = _readString(json['nickname']).trim();
+    final region = _readString(json['region']).trim();
+    final industry = _readString(json['industry']).trim();
+
     return StoreProfile(
-      nickname: (json['nickname'] ?? '').toString(),
-      region: (json['region'] ?? '').toString(),
-      industry: (json['industry'] ?? '').toString(),
-      isOwnerVerified: json['isOwnerVerified'] == true,
-      isIdentityVerified: json['isIdentityVerified'] == true,
+      nickname: nickname.isEmpty ? '익명' : nickname,
+      region: region.isEmpty ? '서울' : region,
+      industry: industry.isEmpty ? '미용/헤어' : industry,
+      isOwnerVerified: _readBool(json['isOwnerVerified']),
+      isIdentityVerified: _readBool(json['isIdentityVerified']),
       notificationsEnabled: json['notificationsEnabled'] != false,
-      blockedUsers: (json['blockedUsers'] as List<dynamic>? ?? [])
-          .map((e) => BlockedUserItem.fromJson(Map<String, dynamic>.from(e)))
-          .toList(),
-      notifications: (json['notifications'] as List<dynamic>? ?? [])
-          .map((e) => AppNotificationItem.fromJson(Map<String, dynamic>.from(e)))
-          .toList(),
+      blockedUsers: _decodeBlockedUsers(json['blockedUsers']),
+      notifications: _decodeNotifications(json['notifications']),
     );
+  }
+
+  static String _readString(dynamic value) {
+    if (value == null) return '';
+    return value.toString();
+  }
+
+  static bool _readBool(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+
+    final text = value?.toString().trim().toLowerCase();
+    return text == 'true' || text == '1' || text == 'yes';
+  }
+
+  static List<BlockedUserItem> _decodeBlockedUsers(dynamic raw) {
+    if (raw is! List) {
+      return const <BlockedUserItem>[];
+    }
+
+    final result = <BlockedUserItem>[];
+
+    for (final item in raw) {
+      try {
+        if (item is! Map) continue;
+
+        final decoded = BlockedUserItem.fromJson(
+          Map<String, dynamic>.from(item),
+        );
+
+        result.add(decoded);
+      } catch (_) {
+        // 오래된 로컬 데이터나 깨진 항목 하나 때문에 전체 프로필을 버리지 않는다.
+      }
+    }
+
+    return List<BlockedUserItem>.unmodifiable(result);
+  }
+
+  static List<AppNotificationItem> _decodeNotifications(dynamic raw) {
+    if (raw is! List) {
+      return const <AppNotificationItem>[];
+    }
+
+    final result = <AppNotificationItem>[];
+
+    for (final item in raw) {
+      try {
+        if (item is! Map) continue;
+
+        final decoded = AppNotificationItem.fromJson(
+          Map<String, dynamic>.from(item),
+        );
+
+        result.add(decoded);
+      } catch (_) {
+        // 오래된 로컬 데이터나 깨진 알림 하나 때문에 전체 프로필을 버리지 않는다.
+      }
+    }
+
+    return List<AppNotificationItem>.unmodifiable(result);
   }
 }

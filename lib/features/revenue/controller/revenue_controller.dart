@@ -92,7 +92,9 @@ class RevenueController extends GetxController {
 
   bool _marketLoaded = false;
 
+  int _loadGeneration = 0;
   int _dailyEntriesVersion = 0;
+  int _monthlyEntriesVersion = 0;
   int _marketRecordsVersion = 0;
   int _profileVersion = 0;
 
@@ -128,19 +130,27 @@ class RevenueController extends GetxController {
   }
 
   Future<void> load() async {
+    final generation = ++_loadGeneration;
+
     try {
       isLoading.value = true;
       error.value = null;
 
       final dailyResult = await repo.fetchDailyEntries();
+      if (!_isCurrentLoad(generation)) return;
+
       final monthlyResult = await repo.fetchMonthlyTotalEntries();
+      if (!_isCurrentLoad(generation)) return;
+
       final storeProfile = await storeProfileRepo.fetchProfile();
+      if (!_isCurrentLoad(generation)) return;
 
       dailyEntriesRx.assignAll(dailyResult);
       monthlyTotalEntriesRx.assignAll(monthlyResult);
       profile.value = storeProfile;
 
       _dailyEntriesVersion++;
+      _monthlyEntriesVersion++;
       _profileVersion++;
       _invalidateDailyDerivedCaches();
       _invalidateRecent4WeekTrendCache();
@@ -154,16 +164,26 @@ class RevenueController extends GetxController {
           to: today,
         );
 
+        if (!_isCurrentLoad(generation)) return;
+
         marketRecords.assignAll(market);
         _marketLoaded = true;
         _marketRecordsVersion++;
         _invalidateRecent4WeekTrendCache();
       }
     } catch (_) {
-      error.value = '매출 데이터를 불러오지 못했습니다.';
+      if (_isCurrentLoad(generation)) {
+        error.value = '매출 데이터를 불러오지 못했습니다.';
+      }
     } finally {
-      isLoading.value = false;
+      if (_isCurrentLoad(generation)) {
+        isLoading.value = false;
+      }
     }
+  }
+
+  Future<void> reload() async {
+    await load();
   }
 
   bool get isDailyMode => selectedInputMode.value == RevenueInputMode.daily;
@@ -259,20 +279,13 @@ class RevenueController extends GetxController {
       isSaving.value = true;
       error.value = null;
 
-      await repo.saveDailyEntry(
+      final saved = await repo.saveDailyEntry(
         date: targetDate,
         amount: isClosed ? null : amount,
         isClosed: isClosed,
       );
 
-      final newEntry = RevenueEntry(
-        id: selectedDateEntry?.id ?? _tempDailyId(targetDate),
-        date: targetDate,
-        amount: isClosed ? null : amount,
-        isClosed: isClosed,
-      );
-
-      _upsertDailyEntry(newEntry);
+      _upsertDailyEntry(saved);
       return true;
     } catch (_) {
       error.value = '매출 저장에 실패했습니다.';
@@ -307,18 +320,12 @@ class RevenueController extends GetxController {
       isSaving.value = true;
       error.value = null;
 
-      await repo.saveMonthlyTotalEntry(
+      final saved = await repo.saveMonthlyTotalEntry(
         month: targetMonth,
         amount: amount,
       );
 
-      final newEntry = RevenueMonthlyTotalEntry(
-        id: selectedMonthlyTotalEntry?.id ?? _tempMonthlyId(targetMonth),
-        month: targetMonth,
-        amount: amount,
-      );
-
-      _upsertMonthlyTotalEntry(newEntry);
+      _upsertMonthlyTotalEntry(saved);
       return true;
     } catch (_) {
       error.value = '월 매출 저장에 실패했습니다.';
@@ -372,13 +379,17 @@ class RevenueController extends GetxController {
   }
 
   void _upsertDailyEntry(RevenueEntry entry) {
+    final normalized = entry.copyWith(
+      date: _dateOnly(entry.date),
+    );
+
     final list = dailyEntriesRx.toList();
-    final index = list.indexWhere((e) => _isSameDate(e.date, entry.date));
+    final index = list.indexWhere((e) => _isSameDate(e.date, normalized.date));
 
     if (index >= 0) {
-      list[index] = entry;
+      list[index] = normalized;
     } else {
-      list.add(entry);
+      list.add(normalized);
     }
 
     list.sort((a, b) => a.date.compareTo(b.date));
@@ -403,21 +414,27 @@ class RevenueController extends GetxController {
   }
 
   void _upsertMonthlyTotalEntry(RevenueMonthlyTotalEntry entry) {
+    final normalized = entry.copyWith(
+      month: DateTime(entry.month.year, entry.month.month, 1),
+    );
+
     final list = monthlyTotalEntriesRx.toList();
     final index = list.indexWhere(
       (e) =>
-          e.month.year == entry.month.year &&
-          e.month.month == entry.month.month,
+          e.month.year == normalized.month.year &&
+          e.month.month == normalized.month.month,
     );
 
     if (index >= 0) {
-      list[index] = entry;
+      list[index] = normalized;
     } else {
-      list.add(entry);
+      list.add(normalized);
     }
 
     list.sort((a, b) => a.month.compareTo(b.month));
     monthlyTotalEntriesRx.assignAll(list);
+
+    _monthlyEntriesVersion++;
   }
 
   void _removeMonthlyTotalEntry(DateTime month) {
@@ -429,6 +446,8 @@ class RevenueController extends GetxController {
       ..sort((a, b) => a.month.compareTo(b.month));
 
     monthlyTotalEntriesRx.assignAll(list);
+
+    _monthlyEntriesVersion++;
   }
 
   void _invalidateDailyDerivedCaches() {
@@ -455,14 +474,6 @@ class RevenueController extends GetxController {
     _recent4WeekTrendMarketVersion = -1;
     _recent4WeekTrendProfileVersion = -1;
     _recent4WeekTrendCache = const <RevenueWeeklyTrendPoint>[];
-  }
-
-  String _tempDailyId(DateTime date) {
-    return 'daily_${date.year}_${date.month}_${date.day}';
-  }
-
-  String _tempMonthlyId(DateTime month) {
-    return 'monthly_${month.year}_${month.month}';
   }
 
   bool _hasMonthlyTotalForMonth(DateTime month) {
@@ -1129,6 +1140,10 @@ class RevenueController extends GetxController {
         .map((e) => e.amount)
         .where((e) => e > 0)
         .toList();
+  }
+
+  bool _isCurrentLoad(int generation) {
+    return _loadGeneration == generation;
   }
 
   DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);

@@ -16,8 +16,6 @@ class CommunityHomeScreen extends StatefulWidget {
 class _CommunityHomeScreenState extends State<CommunityHomeScreen> {
   late final PostListController c;
 
-  PostSort _sort = PostSort.latest;
-
   @override
   void initState() {
     super.initState();
@@ -25,7 +23,7 @@ class _CommunityHomeScreenState extends State<CommunityHomeScreen> {
 
     if (c.posts.isEmpty && !c.isLoading.value) {
       Future.microtask(() async {
-        await c.initLoad();
+        await c.ensureFeedInitialized();
       });
     }
   }
@@ -39,33 +37,7 @@ class _CommunityHomeScreenState extends State<CommunityHomeScreen> {
   }
 
   Future<void> _changeSort(PostSort sort) async {
-    setState(() {
-      _sort = sort;
-    });
-
-    await c.initLoad();
-  }
-
-  List<Post> _sortedPosts(List<Post> posts) {
-    final list = List<Post>.from(posts);
-
-    switch (_sort) {
-      case PostSort.latest:
-        list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-        break;
-      case PostSort.hot:
-        list.sort((a, b) {
-          final aScore = (a.likeCount * 3) + (a.commentCount * 2) + a.viewCount;
-          final bScore = (b.likeCount * 3) + (b.commentCount * 2) + b.viewCount;
-          return bScore.compareTo(aScore);
-        });
-        break;
-      case PostSort.mostCommented:
-        list.sort((a, b) => b.commentCount.compareTo(a.commentCount));
-        break;
-    }
-
-    return list;
+    await c.setSort(sort);
   }
 
   String _sortLabel(PostSort sort) {
@@ -95,45 +67,66 @@ class _CommunityHomeScreenState extends State<CommunityHomeScreen> {
       appBar: AppBar(
         title: const Text('커뮤니티'),
         actions: [
-          PopupMenuButton<PostSort>(
-            tooltip: '정렬',
-            initialValue: _sort,
-            onSelected: _changeSort,
-            itemBuilder: (_) => const [
-              PopupMenuItem(
-                value: PostSort.latest,
-                child: Text('최신'),
-              ),
-              PopupMenuItem(
-                value: PostSort.hot,
-                child: Text('인기'),
-              ),
-              PopupMenuItem(
-                value: PostSort.mostCommented,
-                child: Text('댓글많은순'),
-              ),
-            ],
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Center(
-                child: Text(
-                  _sortLabel(_sort),
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF875646),
+          Obx(() {
+            final selectedSort = c.selectedSort.value;
+
+            return PopupMenuButton<PostSort>(
+              tooltip: '정렬',
+              initialValue: selectedSort,
+              onSelected: _changeSort,
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: PostSort.latest,
+                  child: Text('최신'),
+                ),
+                PopupMenuItem(
+                  value: PostSort.hot,
+                  child: Text('인기'),
+                ),
+                PopupMenuItem(
+                  value: PostSort.mostCommented,
+                  child: Text('댓글많은순'),
+                ),
+              ],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Center(
+                  child: Text(
+                    _sortLabel(selectedSort),
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF875646),
+                    ),
                   ),
                 ),
               ),
-            ),
-          ),
+            );
+          }),
         ],
       ),
       body: Obx(() {
-        final list = _sortedPosts(c.posts);
+        final list = c.visiblePosts;
 
         if (c.isLoading.value && list.isEmpty) {
           return const Center(child: CircularProgressIndicator());
+        }
+
+        if (c.error.value != null && list.isEmpty) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Text(
+                '에러: ${c.error.value}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: Color(0xFF6B7280),
+                  height: 1.4,
+                ),
+              ),
+            ),
+          );
         }
 
         if (list.isEmpty) {

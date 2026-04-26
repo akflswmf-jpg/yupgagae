@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/image/app_image_provider_resolver.dart';
 import 'package:yupgagae/features/community/controller/owner_board_controller.dart';
 import 'package:yupgagae/features/community/domain/industry_catalog.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
@@ -32,8 +32,6 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
   void initState() {
     super.initState();
 
-    // 기존 microtask 즉시 prewarm 제거
-    // 첫 진입 프레임을 살리고 살짝 늦게 태운다.
     _prewarmTimer = Timer(const Duration(milliseconds: 260), () async {
       if (!mounted) return;
       await c.prewarm();
@@ -265,22 +263,20 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
     if (!mounted || post.imagePaths.isEmpty) return;
 
     for (final path in post.imagePaths) {
-      if (path.trim().isEmpty) continue;
+      final provider = AppImageProviderResolver.resolve(
+        path,
+        resizeWidth: 960,
+      );
+
+      if (provider == null) continue;
 
       try {
-        final provider = ResizeImage(
-          FileImage(File(path)),
-          width: 960,
-        );
         await precacheImage(provider, context);
-      } catch (_) {
-        // 일부 이미지 프리캐시 실패는 무시
-      }
+      } catch (_) {}
     }
   }
 
   Future<void> _openPostDetail(Post p) async {
-    // 상세 진입 전에 await로 막지 않는다.
     unawaited(Future<void>(() async {
       await _precacheImages(p);
     }));

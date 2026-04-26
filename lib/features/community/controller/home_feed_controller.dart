@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_page.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
@@ -9,12 +9,12 @@ import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart'
 
 class HomeFeedController extends GetxController {
   final PostRepository repo;
-  final AnonSessionService anonSessionService;
+  final AuthSessionService auth;
   final StoreProfileRepository storeProfileRepo;
 
   HomeFeedController({
     required this.repo,
-    required this.anonSessionService,
+    required this.auth,
     required this.storeProfileRepo,
   });
 
@@ -45,8 +45,12 @@ class HomeFeedController extends GetxController {
 
   final error = RxnString();
 
-  // shared-Future guard: 동시 호출이 오면 모두 같은 로딩을 기다린다.
   Future<void>? _loadAllFuture;
+
+  DateTime? _lastFullLoadAt;
+  DateTime? _lastOwnerVerificationAt;
+
+  int _loadGeneration = 0;
 
   static const int topLimit = 5;
   static const int latestLimit = 20;
@@ -55,7 +59,36 @@ class HomeFeedController extends GetxController {
   static const int _hotLikeWeight = 3;
   static const int _hotCommentWeight = 4;
 
-  String get currentUserId => anonSessionService.anonId;
+  static const Duration _staleAfter = Duration(seconds: 30);
+  static const Duration _ownerVerificationStaleAfter = Duration(minutes: 2);
+
+  String get currentUserId => auth.currentUserId;
+
+  bool get hasAnyContent {
+    return hot.isNotEmpty ||
+        mostCommented.isNotEmpty ||
+        ownerHot.isNotEmpty ||
+        latest.isNotEmpty ||
+        usedLatest.isNotEmpty ||
+        ownerLatest.isNotEmpty;
+  }
+
+  bool get isAnyLoading {
+    return isLoadingTop.value ||
+        isLoadingLatest.value ||
+        isLoadingUsedLatest.value ||
+        isLoadingOwnerLatest.value ||
+        isLoadingMore.value ||
+        isLoadingMoreUsed.value ||
+        isLoadingMoreOwner.value;
+  }
+
+  bool get isStale {
+    final last = _lastFullLoadAt;
+    if (last == null) return true;
+
+    return DateTime.now().difference(last) >= _staleAfter;
+  }
 
   @override
   void onInit() {
@@ -67,38 +100,88 @@ class HomeFeedController extends GetxController {
     _loadAllFuture ??= _doLoadAll().whenComplete(() {
       _loadAllFuture = null;
     });
+
     return _loadAllFuture!;
   }
 
+  Future<void> refreshIfStale({
+    bool force = false,
+  }) async {
+    if (_loadAllFuture != null) {
+      await _loadAllFuture;
+      return;
+    }
+
+    if (!force && hasAnyContent && !isStale) {
+      return;
+    }
+
+    await loadAll();
+  }
+
+  Future<void> refreshAll() async {
+    await refreshIfStale(force: true);
+  }
+
   Future<void> _doLoadAll() async {
+    final generation = ++_loadGeneration;
+
     error.value = null;
 
-    await Future.wait([
-      refreshOwnerVerification(),
-      loadTop(),
-      refreshLatest(),
-      refreshUsedLatest(),
-      refreshOwnerLatest(),
+    await Future.wait<void>([
+      _refreshOwnerVerificationIfStale(force: true),
+      loadTop(generation: generation),
+      refreshLatest(generation: generation),
+      refreshUsedLatest(generation: generation),
+      refreshOwnerLatest(generation: generation),
     ]);
+
+    if (_loadGeneration == generation) {
+      _lastFullLoadAt = DateTime.now();
+    }
+  }
+
+  Future<void> _refreshOwnerVerificationIfStale({
+    bool force = false,
+  }) async {
+    final last = _lastOwnerVerificationAt;
+
+    if (!force &&
+        last != null &&
+        DateTime.now().difference(last) < _ownerVerificationStaleAfter) {
+      return;
+    }
+
+    await refreshOwnerVerification();
   }
 
   Future<void> refreshOwnerVerification() async {
     try {
       final profile = await storeProfileRepo.fetchProfile();
       isOwnerVerified.value = profile.isOwnerVerified;
+      _lastOwnerVerificationAt = DateTime.now();
     } catch (_) {
       isOwnerVerified.value = false;
     }
   }
 
-  Future<void> loadTop() async {
+  Future<void> loadTop({
+    int? generation,
+  }) async {
     if (isLoadingTop.value) return;
+
+    final requestGeneration = generation ?? _loadGeneration;
 
     isLoadingTop.value = true;
     error.value = null;
 
     try {
       final allPosts = await repo.fetchHomeTopPosts(limit: 100);
+
+      if (!_isCurrentGeneration(requestGeneration)) {
+        return;
+      }
+
       final recentPosts = _filterRecentPosts(allPosts);
 
       final recentFreePosts =
@@ -125,14 +208,20 @@ class HomeFeedController extends GetxController {
         recentOwnerPosts: recentOwnerPosts,
       );
     } catch (e) {
-      error.value = e.toString();
+      if (_isCurrentGeneration(requestGeneration)) {
+        error.value = e.toString();
+      }
     } finally {
       isLoadingTop.value = false;
     }
   }
 
-  Future<void> refreshLatest() async {
+  Future<void> refreshLatest({
+    int? generation,
+  }) async {
     if (isLoadingLatest.value) return;
+
+    final requestGeneration = generation ?? _loadGeneration;
 
     isLoadingLatest.value = true;
     error.value = null;
@@ -144,18 +233,28 @@ class HomeFeedController extends GetxController {
         boardType: BoardType.free,
       );
 
+      if (!_isCurrentGeneration(requestGeneration)) {
+        return;
+      }
+
       latest.assignAll(_dedupeById(page.items));
       _cursor = page.nextCursor;
       hasMore.value = page.nextCursor != null;
     } catch (e) {
-      error.value = e.toString();
+      if (_isCurrentGeneration(requestGeneration)) {
+        error.value = e.toString();
+      }
     } finally {
       isLoadingLatest.value = false;
     }
   }
 
-  Future<void> refreshUsedLatest() async {
+  Future<void> refreshUsedLatest({
+    int? generation,
+  }) async {
     if (isLoadingUsedLatest.value) return;
+
+    final requestGeneration = generation ?? _loadGeneration;
 
     isLoadingUsedLatest.value = true;
     error.value = null;
@@ -167,18 +266,28 @@ class HomeFeedController extends GetxController {
         boardType: BoardType.used,
       );
 
+      if (!_isCurrentGeneration(requestGeneration)) {
+        return;
+      }
+
       usedLatest.assignAll(_dedupeById(page.items));
       _usedCursor = page.nextCursor;
       hasMoreUsed.value = page.nextCursor != null;
     } catch (e) {
-      error.value = e.toString();
+      if (_isCurrentGeneration(requestGeneration)) {
+        error.value = e.toString();
+      }
     } finally {
       isLoadingUsedLatest.value = false;
     }
   }
 
-  Future<void> refreshOwnerLatest() async {
+  Future<void> refreshOwnerLatest({
+    int? generation,
+  }) async {
     if (isLoadingOwnerLatest.value) return;
+
+    final requestGeneration = generation ?? _loadGeneration;
 
     isLoadingOwnerLatest.value = true;
     error.value = null;
@@ -190,11 +299,17 @@ class HomeFeedController extends GetxController {
         boardType: BoardType.owner,
       );
 
+      if (!_isCurrentGeneration(requestGeneration)) {
+        return;
+      }
+
       ownerLatest.assignAll(_dedupeById(page.items));
       _ownerCursor = page.nextCursor;
       hasMoreOwner.value = page.nextCursor != null;
     } catch (e) {
-      error.value = e.toString();
+      if (_isCurrentGeneration(requestGeneration)) {
+        error.value = e.toString();
+      }
     } finally {
       isLoadingOwnerLatest.value = false;
     }
@@ -371,6 +486,10 @@ class HomeFeedController extends GetxController {
     }
 
     return result;
+  }
+
+  bool _isCurrentGeneration(int generation) {
+    return _loadGeneration == generation;
   }
 
   void _debugLoadTop({

@@ -2,19 +2,19 @@ import 'dart:async';
 
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/service/anon_session_service.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_page.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
 
 class PostListController extends GetxController {
   final PostRepository repo;
-  final AnonSessionService session;
+  final AuthSessionService auth;
   final BoardType boardType;
 
   PostListController({
     required this.repo,
-    required this.session,
+    required this.auth,
     this.boardType = BoardType.free,
   });
 
@@ -40,9 +40,11 @@ class PostListController extends GetxController {
   bool _feedInitialized = false;
   Timer? _debounce;
 
+  int _loadGeneration = 0;
+
   static const int pageSize = 20;
 
-  String get currentUserId => session.anonId;
+  String get currentUserId => auth.currentUserId;
 
   bool get hasInitializedFeed => _feedInitialized;
 
@@ -67,6 +69,7 @@ class PostListController extends GetxController {
   @override
   void onClose() {
     _debounce?.cancel();
+    _loadGeneration++;
     super.onClose();
   }
 
@@ -103,6 +106,7 @@ class PostListController extends GetxController {
 
   Future<void> resetSearchStateForFeed() async {
     _debounce?.cancel();
+    _invalidateLoad();
 
     searchQuery.value = '';
     searchField.value = PostSearchField.all;
@@ -203,6 +207,7 @@ class PostListController extends GetxController {
     final next = value.trim();
 
     searchQuery.value = next;
+    error.value = null;
 
     if (field != null) {
       searchField.value = field;
@@ -210,8 +215,21 @@ class PostListController extends GetxController {
     }
 
     _debounce?.cancel();
+
+    if (next.isEmpty || next.length < 2) {
+      _invalidateLoad();
+      if (next.isEmpty) {
+        unawaited(initLoad());
+      } else {
+        posts.clear();
+        _cursor = null;
+        hasMore.value = false;
+      }
+      return;
+    }
+
     _debounce = Timer(const Duration(milliseconds: 250), () {
-      initLoad();
+      unawaited(initLoad());
     });
   }
 
@@ -222,6 +240,7 @@ class PostListController extends GetxController {
     _debounce?.cancel();
 
     searchQuery.value = value.trim();
+    error.value = null;
 
     if (field != null) {
       searchField.value = field;
@@ -242,6 +261,8 @@ class PostListController extends GetxController {
   }
 
   Future<void> changeSearchField(PostSearchField field) async {
+    if (searchField.value == field) return;
+
     searchField.value = field;
     searchFieldKey.value = _toKey(field);
 
@@ -299,9 +320,26 @@ class PostListController extends GetxController {
   }) async {
     if (reset) {
       if (isLoading.value) return;
-      isLoading.value = true;
     } else {
-      if (isLoadingMore.value) return;
+      if (isLoading.value || isLoadingMore.value) return;
+      if (!hasMore.value) return;
+    }
+
+    final generation = reset ? ++_loadGeneration : _loadGeneration;
+
+    final requestedCursor = reset ? null : _cursor;
+    final requestedSort = selectedSort.value;
+    final requestedSearchQuery = _normalizedSearchQuery();
+    final requestedIndustryId = _effectiveIndustryId();
+    final requestedRegionLabel = selectedRegionLabel.value;
+    final requestedUsedType = _effectiveUsedType();
+    final requestedSearchField = searchField.value;
+
+    if (reset) {
+      isLoading.value = true;
+      _cursor = null;
+      hasMore.value = true;
+    } else {
       isLoadingMore.value = true;
     }
 
@@ -309,25 +347,41 @@ class PostListController extends GetxController {
 
     try {
       final page = await repo.fetchLatestPage(
-        cursor: reset ? null : _cursor,
+        cursor: requestedCursor,
         limit: pageSize,
-        searchQuery: _normalizedSearchQuery(),
+        searchQuery: requestedSearchQuery,
         boardType: boardType,
-        usedType: _effectiveUsedType(),
-        industryId: _effectiveIndustryId(),
-        locationLabel: selectedRegionLabel.value,
-        searchField: searchField.value,
+        usedType: requestedUsedType,
+        industryId: requestedIndustryId,
+        locationLabel: requestedRegionLabel,
+        searchField: requestedSearchField,
       );
+
+      if (!_isCurrentLoad(
+        generation: generation,
+        sort: requestedSort,
+        searchQuery: requestedSearchQuery,
+        industryId: requestedIndustryId,
+        regionLabel: requestedRegionLabel,
+        usedType: requestedUsedType,
+        searchField: requestedSearchField,
+      )) {
+        return;
+      }
 
       _applyPage(
         page: page,
         reset: reset,
       );
     } catch (e) {
-      error.value = e.toString();
+      if (_loadGeneration == generation) {
+        error.value = e.toString();
+      }
     } finally {
       if (reset) {
-        isLoading.value = false;
+        if (_loadGeneration == generation) {
+          isLoading.value = false;
+        }
       } else {
         isLoadingMore.value = false;
       }
@@ -428,6 +482,28 @@ class PostListController extends GetxController {
   UsedPostType? _effectiveUsedType() {
     if (boardType != BoardType.used) return null;
     return selectedUsedType.value;
+  }
+
+  void _invalidateLoad() {
+    _loadGeneration++;
+  }
+
+  bool _isCurrentLoad({
+    required int generation,
+    required PostSort sort,
+    required String? searchQuery,
+    required String? industryId,
+    required String? regionLabel,
+    required UsedPostType? usedType,
+    required PostSearchField searchField,
+  }) {
+    return _loadGeneration == generation &&
+        selectedSort.value == sort &&
+        _normalizedSearchQuery() == searchQuery &&
+        _effectiveIndustryId() == industryId &&
+        selectedRegionLabel.value == regionLabel &&
+        _effectiveUsedType() == usedType &&
+        this.searchField.value == searchField;
   }
 
   String _toKey(PostSearchField field) {

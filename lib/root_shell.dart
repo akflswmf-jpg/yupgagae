@@ -1,11 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 import 'package:yupgagae/features/community/controller/home_feed_controller.dart';
 import 'package:yupgagae/features/community/view/community_shell.dart';
 import 'package:yupgagae/features/home/home_screen.dart';
-import 'package:yupgagae/features/my_store/view/my_store_screen.dart';
 import 'package:yupgagae/features/my_store/controller/my_store_controller.dart';
+import 'package:yupgagae/features/my_store/view/my_store_screen.dart';
 import 'package:yupgagae/features/revenue/view/revenue_screen.dart';
 
 class RootShell extends StatefulWidget {
@@ -22,15 +24,14 @@ class _RootShellState extends State<RootShell> {
 
   late final MyStoreController myStoreController;
 
+  DateTime? _lastHomeSoftRefreshAt;
+
   static const Color kYupgagaeAccent = Color(0xFFA56E5F);
+  static const Duration _homeSoftRefreshCooldown = Duration(seconds: 30);
 
   @override
   void initState() {
     super.initState();
-
-    // ❌ 삭제됨: Binding 직접 호출 금지
-    // RevenueBinding().dependencies();
-    // MyStoreBinding().dependencies();
 
     myStoreController = Get.find<MyStoreController>();
 
@@ -42,10 +43,10 @@ class _RootShellState extends State<RootShell> {
     ];
   }
 
-  Future<void> _handleTap(int nextIndex) async {
+  void _handleTap(int nextIndex) {
     if (index == nextIndex) {
-      if (nextIndex == 0 && Get.isRegistered<HomeFeedController>()) {
-        await Get.find<HomeFeedController>().loadAll();
+      if (nextIndex == 0) {
+        _softRefreshHomeIfAllowed();
       }
       return;
     }
@@ -54,9 +55,24 @@ class _RootShellState extends State<RootShell> {
       index = nextIndex;
     });
 
-    if (nextIndex == 0 && Get.isRegistered<HomeFeedController>()) {
-      await Get.find<HomeFeedController>().loadAll();
+    if (nextIndex == 0) {
+      _softRefreshHomeIfAllowed();
     }
+  }
+
+  void _softRefreshHomeIfAllowed() {
+    if (!Get.isRegistered<HomeFeedController>()) return;
+
+    final now = DateTime.now();
+    final last = _lastHomeSoftRefreshAt;
+
+    if (last != null && now.difference(last) < _homeSoftRefreshCooldown) {
+      return;
+    }
+
+    _lastHomeSoftRefreshAt = now;
+
+    unawaited(Get.find<HomeFeedController>().refreshIfStale());
   }
 
   Widget _buildStoreIcon({required bool active}) {

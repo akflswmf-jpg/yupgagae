@@ -7,15 +7,21 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app/bindings/root_binding.dart';
 import 'core/service/anon_session_service.dart';
 import 'core/theme/app_theme.dart';
+import 'core/ui/app_messenger.dart';
 import 'routes/app_pages.dart';
 import 'routes/app_routes.dart';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await SharedPreferences.getInstance();
-  await getApplicationDocumentsDirectory();
+  // 앱 첫 실행/첫 조작 때 튀는 비용을 줄이기 위한 최소 선예열.
+  // SharedPreferences, 앱 문서 디렉터리 접근은 첫 호출 때 비용이 생길 수 있다.
+  await Future.wait<void>([
+    SharedPreferences.getInstance(),
+    getApplicationDocumentsDirectory(),
+  ]);
 
+  // 익명 세션은 Repository/Controller들이 의존하므로 runApp 전에 반드시 등록한다.
   final anon = await AnonSessionService.load();
   Get.put<AnonSessionService>(anon, permanent: true);
 
@@ -28,6 +34,7 @@ class YeopgaGaeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GetMaterialApp(
+      scaffoldMessengerKey: AppMessenger.messengerKey,
       debugShowCheckedModeBanner: false,
       title: '옆가게',
       theme: buildAppTheme(),

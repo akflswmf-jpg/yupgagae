@@ -1,9 +1,8 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/image/app_image_provider_resolver.dart';
 import 'package:yupgagae/core/navigation/route_input_resolver.dart';
 import 'package:yupgagae/core/ui/app_messenger.dart';
 import 'package:yupgagae/features/community/controller/write_post_controller.dart';
@@ -729,7 +728,10 @@ class _ImagePreviewRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final file = File(path);
+    final provider = AppImageProviderResolver.resolve(
+      path,
+      resizeWidth: 320,
+    );
 
     return Row(
       children: [
@@ -742,18 +744,15 @@ class _ImagePreviewRow extends StatelessWidget {
               color: const Color(0xFFF3F4F6),
               border: Border.all(color: const Color(0xFFE5E7EB)),
             ),
-            child: Image.file(
-              file,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) {
-                return const Center(
-                  child: Icon(
-                    Icons.image_not_supported_outlined,
-                    color: Color(0xFF9CA3AF),
+            child: provider == null
+                ? const _ImageFallback()
+                : Image(
+                    image: provider,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) {
+                      return const _ImageFallback();
+                    },
                   ),
-                );
-              },
-            ),
           ),
         ),
         const SizedBox(width: 12),
@@ -792,6 +791,20 @@ class _ImagePreviewRow extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ImageFallback extends StatelessWidget {
+  const _ImageFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Icon(
+        Icons.image_not_supported_outlined,
+        color: Color(0xFF9CA3AF),
+      ),
     );
   }
 }
