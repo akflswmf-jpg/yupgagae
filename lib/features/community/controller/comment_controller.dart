@@ -56,6 +56,7 @@ class CommentController extends GetxController {
   final _rootIds = <String>{};
 
   _AuthorSnapshot? _cachedAuthor;
+  Future<_AuthorSnapshot>? _authorSnapshotFuture;
 
   AnonSessionService? get _session {
     if (!Get.isRegistered<AnonSessionService>()) return null;
@@ -86,7 +87,7 @@ class CommentController extends GetxController {
     }
 
     if (_didInitialize && _postId == normalized) {
-      unawaited(_prewarmAuthorSnapshot());
+      await _prewarmAuthorSnapshot();
       return;
     }
 
@@ -94,9 +95,16 @@ class CommentController extends GetxController {
     _didInitialize = true;
 
     await _loadBlockedCache();
-    await load();
 
-    unawaited(_prewarmAuthorSnapshot());
+    // 댓글 목록 로딩과 작성자 스냅샷 예열을 병렬로 시작한다.
+    // 목적:
+    // - 상세 진입 로딩 시간을 불필요하게 늘리지 않음
+    // - initialize 완료 시점에는 _cachedAuthor가 준비되도록 보장
+    // - 첫 댓글/답글 작성 순간에 fetchProfile()이 처음 터지는 상황 방지
+    final authorWarmUpFuture = _prewarmAuthorSnapshot();
+
+    await load();
+    await authorWarmUpFuture;
   }
 
   Future<void> load() async {
@@ -155,53 +163,69 @@ class CommentController extends GetxController {
     final cached = _cachedAuthor;
     if (cached != null) return cached;
 
+    final inFlight = _authorSnapshotFuture;
+    if (inFlight != null) return inFlight;
+
+    final future = _loadAuthorSnapshot();
+
+    _authorSnapshotFuture = future;
+
     try {
-      final StoreProfile profile = await storeProfileRepo.fetchProfile();
-
-      final nickname = profile.nickname.trim().isEmpty
-          ? '익명'
-          : profile.nickname.trim();
-
-      String? industryId;
-      final profileIndustry = profile.industry.trim();
-
-      if (profileIndustry.isNotEmpty) {
-        for (final item in IndustryCatalog.ordered()) {
-          if (item.name == profileIndustry || item.id == profileIndustry) {
-            industryId = item.id;
-            break;
-          }
-        }
-      }
-
-      final snapshot = _AuthorSnapshot(
-        authorId: currentUserId,
-        authorLabel: nickname,
-        industryId: industryId,
-        locationLabel: RegionCatalog.normalize(profile.region),
-        isOwnerVerified: profile.isOwnerVerified,
-      );
-
+      final snapshot = await future;
       _cachedAuthor = snapshot;
       return snapshot;
     } catch (_) {
       final fallback = _AuthorSnapshot.fallback(currentUserId);
       _cachedAuthor = fallback;
       return fallback;
+    } finally {
+      if (_authorSnapshotFuture == future) {
+        _authorSnapshotFuture = null;
+      }
     }
+  }
+
+  Future<_AuthorSnapshot> _loadAuthorSnapshot() async {
+    final StoreProfile profile = await storeProfileRepo.fetchProfile();
+
+    final nickname = profile.nickname.trim().isEmpty
+        ? '익명'
+        : profile.nickname.trim();
+
+    String? industryId;
+    final profileIndustry = profile.industry.trim();
+
+    if (profileIndustry.isNotEmpty) {
+      for (final item in IndustryCatalog.ordered()) {
+        if (item.name == profileIndustry || item.id == profileIndustry) {
+          industryId = item.id;
+          break;
+        }
+      }
+    }
+
+    return _AuthorSnapshot(
+      authorId: currentUserId,
+      authorLabel: nickname,
+      industryId: industryId,
+      locationLabel: RegionCatalog.normalize(profile.region),
+      isOwnerVerified: profile.isOwnerVerified,
+    );
   }
 
   _AuthorSnapshot _authorSnapshotForFastSubmit() {
     final cached = _cachedAuthor;
     if (cached != null) return cached;
 
-    unawaited(_prewarmAuthorSnapshot());
-
+    // 여기서 prewarm을 새로 발사하지 않는다.
+    // 첫 댓글/답글 시점에 fetchProfile()이 같이 터지면 키보드 dismiss,
+    // 로컬 댓글 삽입, 실제 댓글 교체와 충돌해 첫 등록 체감이 무거워질 수 있다.
     return _AuthorSnapshot.fallback(currentUserId);
   }
 
   void clearAuthorCache() {
     _cachedAuthor = null;
+    _authorSnapshotFuture = null;
     unawaited(_prewarmAuthorSnapshot());
   }
 
@@ -377,7 +401,19 @@ class CommentController extends GetxController {
       replies.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     }
 
-    _rebuildFlattenedOnly();
+    // 전체 리빌드 대신 해당 아이템만 교체 — 댓글 목록 전체 재빌드 방지
+    final flatIndex = flattenedComments.indexWhere(
+      (item) => item.comment.id == updated.id,
+    );
+    if (flatIndex >= 0) {
+      flattenedComments[flatIndex] = CommentViewItem(
+        comment: updated,
+        depth: flattenedComments[flatIndex].depth,
+      );
+    } else if (listIndex < 0) {
+      // 목록에 없던 새 댓글이 추가된 경우에만 전체 리빌드
+      _rebuildFlattenedOnly();
+    }
   }
 
   void _replaceLocalComment({
@@ -417,7 +453,17 @@ class CommentController extends GetxController {
       }
     }
 
-    _rebuildFlattenedOnly();
+    // 전체 리빌드 대신 해당 아이템만 교체 — 댓글 100개 게시물에서 첫 댓글 1초 지연 방지
+    final flatIndex = flattenedComments.indexWhere(
+      (item) => item.comment.id == localId,
+    );
+    if (flatIndex >= 0) {
+      flattenedComments[flatIndex] = CommentViewItem(
+        comment: realComment,
+        depth: flattenedComments[flatIndex].depth,
+      );
+    }
+    // 낙관적 삽입 아이템이 없는 경우(차단된 사용자 등)는 그대로 유지
   }
 
   void _removeCommentById(String commentId) {
@@ -946,6 +992,7 @@ class CommentController extends GetxController {
     _postId = null;
     _didInitialize = false;
     _cachedAuthor = null;
+    _authorSnapshotFuture = null;
 
     activeEditingId.value = null;
     activeReplyTo.value = null;

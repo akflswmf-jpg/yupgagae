@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:get/get.dart';
 
 import 'package:yupgagae/core/service/anon_session_service.dart';
@@ -27,11 +25,10 @@ class RootBinding extends Bindings {
 
     MyStoreBinding().dependencies();
     RevenueBinding().dependencies();
-
-    _warmUpRepositories();
   }
 
   void _requireAnonSession() {
+    // ❗ 여기 핵심 수정
     if (!Get.isRegistered<AnonSessionService>()) {
       throw Exception('AnonSessionService must be initialized in main.dart');
     }
@@ -53,7 +50,6 @@ class RootBinding extends Bindings {
       Get.lazyPut<PostRepository>(
         () => InMemoryPostRepository(
           currentUserId: Get.find<AnonSessionService>().anonId,
-          storeProfileRepo: Get.find<StoreProfileRepository>(),
         ),
         fenix: true,
       );
@@ -96,21 +92,5 @@ class RootBinding extends Bindings {
         fenix: true,
       );
     }
-  }
-
-  void _warmUpRepositories() {
-    Future.microtask(() async {
-      try {
-        final storeProfileRepo = Get.find<StoreProfileRepository>();
-        final postRepo = Get.find<PostRepository>();
-
-        await Future.wait([
-          storeProfileRepo.warmUp(),
-          postRepo.warmUp(),
-        ]);
-      } catch (_) {
-        // 워밍업 실패는 앱 진입을 막지 않는다.
-      }
-    });
   }
 }

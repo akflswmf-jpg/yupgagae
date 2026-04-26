@@ -10,22 +10,22 @@ class MyStoreBinding extends Bindings {
   @override
   void dependencies() {
     if (!Get.isRegistered<StoreProfileRepository>()) {
-      Get.lazyPut<StoreProfileRepository>(
-        () => InMemoryStoreProfileRepository(
+      Get.put<StoreProfileRepository>(
+        InMemoryStoreProfileRepository(
           session: Get.find<AnonSessionService>(),
         ),
-        fenix: true,
+        permanent: true,
       );
     }
 
     if (!Get.isRegistered<MyStoreController>()) {
-      Get.lazyPut<MyStoreController>(
-        () => MyStoreController(
+      Get.put<MyStoreController>(
+        MyStoreController(
           repo: Get.find<StoreProfileRepository>(),
           postRepo: Get.find<PostRepository>(),
           session: Get.find<AnonSessionService>(),
         ),
-        fenix: true,
+        permanent: true,
       );
     }
   }

@@ -1,6 +1,3 @@
-import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
@@ -16,28 +13,13 @@ import 'routes/app_routes.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  await SharedPreferences.getInstance();
+  await getApplicationDocumentsDirectory();
+
   final anon = await AnonSessionService.load();
   Get.put<AnonSessionService>(anon, permanent: true);
 
-  unawaited(_warmUpPlatformBasics());
-
   runApp(const YeopgaGaeApp());
-}
-
-Future<void> _warmUpPlatformBasics() async {
-  try {
-    await SharedPreferences.getInstance();
-    await getApplicationDocumentsDirectory();
-
-    final encoded = jsonEncode({
-      'warmup': true,
-      'at': DateTime.now().millisecondsSinceEpoch,
-    });
-
-    jsonDecode(encoded);
-  } catch (_) {
-    // 앱 시작 워밍업은 실패해도 실제 기능 흐름을 막지 않는다.
-  }
 }
 
 class YeopgaGaeApp extends StatelessWidget {

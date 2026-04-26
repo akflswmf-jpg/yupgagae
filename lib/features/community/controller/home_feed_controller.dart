@@ -45,12 +45,15 @@ class HomeFeedController extends GetxController {
 
   final error = RxnString();
 
+  // shared-Future guard: 동시 호출이 오면 모두 같은 로딩을 기다린다.
+  Future<void>? _loadAllFuture;
+
   static const int topLimit = 5;
   static const int latestLimit = 20;
 
   static const int _topWindowHours = 72;
   static const int _hotLikeWeight = 3;
-  static const int _hotCommentWeight = 2;
+  static const int _hotCommentWeight = 4;
 
   String get currentUserId => anonSessionService.anonId;
 
@@ -60,7 +63,14 @@ class HomeFeedController extends GetxController {
     loadAll();
   }
 
-  Future<void> loadAll() async {
+  Future<void> loadAll() {
+    _loadAllFuture ??= _doLoadAll().whenComplete(() {
+      _loadAllFuture = null;
+    });
+    return _loadAllFuture!;
+  }
+
+  Future<void> _doLoadAll() async {
     error.value = null;
 
     await Future.wait([

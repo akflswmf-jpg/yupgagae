@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:yupgagae/core/service/anon_session_service.dart';
@@ -16,11 +19,17 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
 
   InMemoryStoreProfileRepository({
     required this.session,
-  });
+  }) {
+    // 생성 즉시 SharedPreferences 로딩을 시작한다.
+    // fetchProfile() 호출 시점엔 이미 완료되어 있거나 in-flight future를 공유한다.
+    _loadFuture = _loadFromPrefs();
+  }
 
   final Map<String, StoreProfile> _profiles = {};
   bool _loaded = false;
   Future<void>? _loadFuture;
+
+  Future<void> _saveChain = Future<void>.value();
 
   String get _me => session.anonId;
 
@@ -48,58 +57,78 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
   }
 
   Future<void> _ensureLoaded() async {
-    if (_loaded) return;
-    _loadFuture ??= _loadFromPrefs();
+    // 생성자에서 항상 _loadFuture를 set하므로 null 체크 불필요.
     await _loadFuture;
   }
 
   Future<void> _loadFromPrefs() async {
+    var shouldPersist = false;
+
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_profilesKey);
 
-      if (raw != null && raw.isNotEmpty) {
+      if (raw != null && raw.trim().isNotEmpty) {
         try {
-          final decoded = jsonDecode(raw);
-          if (decoded is Map) {
-            decoded.forEach((key, value) {
-              final userId = key.toString().trim();
-              if (userId.isEmpty) return;
-              if (value is! Map) return;
+          final decodedProfiles = await compute(
+            _decodeStoreProfilesOnWorker,
+            raw,
+          );
 
-              _profiles[userId] = StoreProfile.fromJson(
-                Map<String, dynamic>.from(value),
-              );
-            });
-          }
+          _profiles
+            ..clear()
+            ..addAll(decodedProfiles);
         } catch (_) {
-          // 저장값이 깨져 있으면 기본값으로 복구
+          _profiles.clear();
+          shouldPersist = true;
         }
       }
 
       if (!_profiles.containsKey(_me)) {
         _profiles[_me] = _defaultProfile(_me);
+        shouldPersist = true;
       }
 
-      await _persist();
+      if (shouldPersist) {
+        await _persist();
+      }
     } finally {
       _loaded = true;
     }
   }
 
   Future<void> _persist() async {
-    final prefs = await SharedPreferences.getInstance();
+    _saveChain = _saveChain.then((_) async {
+      final prefs = await SharedPreferences.getInstance();
 
-    final encoded = <String, dynamic>{};
-    _profiles.forEach((k, v) {
-      encoded[k] = v.toJson();
+      final payload = <String, dynamic>{};
+      _profiles.forEach((k, v) {
+        payload[k] = v.toJson();
+      });
+
+      final encoded = await compute(
+        _encodeStoreProfilesOnWorker,
+        payload,
+      );
+
+      await prefs.setString(_profilesKey, encoded);
+    }).catchError((_) {
+      // 로컬 저장 실패는 앱 흐름을 막지 않는다.
     });
 
-    await prefs.setString(_profilesKey, jsonEncode(encoded));
+    await _saveChain;
   }
 
   StoreProfile _get(String userId) {
     final safeUserId = userId.trim();
+
+    if (safeUserId.isEmpty) {
+      return _profiles.putIfAbsent(
+        _me,
+        () => _defaultProfile(_me),
+      );
+    }
+
     return _profiles.putIfAbsent(
       safeUserId,
       () => _defaultProfile(safeUserId),
@@ -114,13 +143,16 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
 
   List<BlockedUserItem> _normalizedBlockedUsers(List<BlockedUserItem> src) {
     final map = <String, BlockedUserItem>{};
+
     for (final item in src) {
       final id = item.userId.trim();
       if (id.isEmpty) continue;
       map[id] = item.copyWith(userId: id);
     }
+
     final next = map.values.toList()
       ..sort((a, b) => b.blockedAt.compareTo(a.blockedAt));
+
     return next;
   }
 
@@ -135,12 +167,15 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final normalized = nickname.trim();
+
     if (normalized.isEmpty) {
       throw Exception('닉네임을 입력하세요');
     }
+
     if (normalized.length < 2) {
       throw Exception('닉네임은 2자 이상이어야 합니다');
     }
+
     if (normalized.length > 12) {
       throw Exception('닉네임은 12자 이하로 입력하세요');
     }
@@ -172,11 +207,13 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final normalized = industry.trim();
+
     if (normalized.isEmpty) {
       throw Exception('업종을 선택하세요');
     }
 
     final valid = IndustryCatalog.ordered().any((e) => e.name == normalized);
+
     if (!valid) {
       throw Exception('유효하지 않은 업종입니다');
     }
@@ -195,9 +232,11 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final normalized = RegionCatalog.normalize(region);
+
     if (normalized == null || normalized.isEmpty) {
       throw Exception('지역을 선택하세요');
     }
+
     if (!StoreProfile.regionOptions.contains(normalized)) {
       throw Exception('유효하지 않은 지역입니다');
     }
@@ -222,6 +261,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final normalizedUserId = user.userId.trim();
+
     if (normalizedUserId.isEmpty) {
       throw Exception('차단할 사용자 ID가 비어 있습니다');
     }
@@ -248,6 +288,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final normalizedUserId = userId.trim();
+
     if (normalizedUserId.isEmpty) {
       throw Exception('해제할 사용자 ID가 비어 있습니다');
     }
@@ -278,6 +319,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final normalizedId = item.id.trim();
+
     if (normalizedId.isEmpty) {
       throw Exception('알림 ID가 비어 있습니다');
     }
@@ -304,6 +346,7 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
 
     final normalizedId = notificationId.trim();
+
     if (normalizedId.isEmpty) {
       throw Exception('알림 ID가 비어 있습니다');
     }
@@ -383,7 +426,9 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
   }
 
   @override
-  Future<List<AppNotificationItem>> getNotificationsByUserId(String userId) async {
+  Future<List<AppNotificationItem>> getNotificationsByUserId(
+    String userId,
+  ) async {
     await _ensureLoaded();
     return List<AppNotificationItem>.unmodifiable(_get(userId).notifications);
   }
@@ -393,4 +438,31 @@ class InMemoryStoreProfileRepository implements StoreProfileRepository {
     await _ensureLoaded();
     return List<BlockedUserItem>.unmodifiable(_get(userId).blockedUsers);
   }
+}
+
+String _encodeStoreProfilesOnWorker(Map<String, dynamic> payload) {
+  return jsonEncode(payload);
+}
+
+Map<String, StoreProfile> _decodeStoreProfilesOnWorker(String raw) {
+  final decoded = jsonDecode(raw);
+
+  if (decoded is! Map) {
+    return <String, StoreProfile>{};
+  }
+
+  final profiles = <String, StoreProfile>{};
+
+  decoded.forEach((key, value) {
+    final userId = key.toString().trim();
+
+    if (userId.isEmpty) return;
+    if (value is! Map) return;
+
+    profiles[userId] = StoreProfile.fromJson(
+      Map<String, dynamic>.from(value),
+    );
+  });
+
+  return profiles;
 }
