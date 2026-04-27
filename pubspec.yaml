@@ -21,13 +21,17 @@ dependencies:
   path_provider: ^2.1.5
   flutter_image_compress: ^2.4.0
   uuid: ^4.5.1
+  firebase_core: ^4.7.0
+  firebase_auth: ^6.4.0
+  cloud_firestore: ^6.3.0
+  google_sign_in: ^7.2.0
+  flutter_native_splash: ^2.4.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
-  flutter_native_splash: ^2.4.0
 
 # 🔥 런처 아이콘 (홈 화면 아이콘)
 flutter_launcher_icons:
@@ -49,6 +53,8 @@ flutter_native_splash:
 
   ios: true
   web: false
+  fullscreen: false
+  android_gravity: center
 
 flutter:
   uses-material-design: true

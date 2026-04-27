@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "182457641442",
+    "project_id": "yupgagae-app",
+    "storage_bucket": "yupgagae-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:182457641442:android:101a690e18837e6765b1bb",
+        "android_client_info": {
+          "package_name": "com.example.yupgagae"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "182457641442-4c04ldcd18f3o1t8b1gheo21i858ei4q.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.yupgagae",
+            "certificate_hash": "66be61bf7fe2c418f712e2de6c323e1d2dce7629"
+          }
+        },
+        {
+          "client_id": "182457641442-cdtjjo2e03gnutaqrpn6l76i4inke3rv.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCkV9Mg8Ch3VphphGvMNrJOz0A0MHMJQwQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "182457641442-cdtjjo2e03gnutaqrpn6l76i4inke3rv.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "182457641442-72fcehu2lvnge5ja86pn0omi0dek1o79.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.yupgagae"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

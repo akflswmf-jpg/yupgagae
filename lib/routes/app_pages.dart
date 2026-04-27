@@ -5,8 +5,15 @@ import 'app_routes.dart';
 
 import 'package:yupgagae/core/navigation/route_input_resolver.dart';
 
+// 스플래시
+import 'package:yupgagae/features/splash/view/splash_screen.dart';
+
 // 루트
 import 'package:yupgagae/root_shell.dart';
+
+// 인증
+import 'package:yupgagae/core/auth/auth_binding.dart';
+import 'package:yupgagae/features/auth/view/login_screen.dart';
 
 // 홈
 import 'package:yupgagae/features/home/home_screen.dart';
@@ -31,13 +38,25 @@ import 'package:yupgagae/features/community/bindings/comment_thread_binding.dart
 class AppPages {
   static final pages = <GetPage>[
     GetPage(
+      name: AppRoutes.splash,
+      page: () => const SplashScreen(),
+      transition: Transition.noTransition,
+    ),
+    GetPage(
       name: AppRoutes.root,
       page: () => const RootShell(),
+      transition: Transition.noTransition,
     ),
     GetPage(
       name: AppRoutes.home,
       page: () => const HomeScreen(),
       binding: HomeBinding(),
+      transition: Transition.noTransition,
+    ),
+    GetPage(
+      name: AppRoutes.login,
+      page: () => const LoginScreen(),
+      binding: AuthBinding(),
     ),
     GetPage(
       name: AppRoutes.communitySearch,
@@ -56,6 +75,7 @@ class AppPages {
 
         if (postId == null || postId.trim().isEmpty) {
           return const Scaffold(
+            backgroundColor: Colors.white,
             body: Center(
               child: Text('postId required'),
             ),

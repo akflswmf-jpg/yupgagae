@@ -1,5 +1,7 @@
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/auth/auth_binding.dart';
+import 'package:yupgagae/core/auth/auth_controller.dart';
 import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/core/auth/local_auth_session_service.dart';
 import 'package:yupgagae/core/service/anon_session_service.dart';
@@ -20,6 +22,10 @@ class RootBinding extends Bindings {
   @override
   void dependencies() {
     _requireAnonSession();
+
+    // Firebase Auth/Firestore 기반 로그인·인증 상태 계층.
+    // 기존 로컬 익명 작성자 세션과 분리해서 먼저 등록한다.
+    AuthBinding().dependencies();
 
     _bindAuthSessionService();
     _bindStoreProfileRepository();
@@ -93,7 +99,7 @@ class RootBinding extends Bindings {
         () => OwnerBoardController(
           repo: Get.find<PostRepository>(),
           auth: Get.find<AuthSessionService>(),
-          storeProfileRepo: Get.find<StoreProfileRepository>(),
+          authController: Get.find<AuthController>(),
         ),
         fenix: true,
       );
@@ -106,6 +112,7 @@ class RootBinding extends Bindings {
         () => HomeFeedController(
           repo: Get.find<PostRepository>(),
           auth: Get.find<AuthSessionService>(),
+          authController: Get.find<AuthController>(),
           storeProfileRepo: Get.find<StoreProfileRepository>(),
         ),
         fenix: true,

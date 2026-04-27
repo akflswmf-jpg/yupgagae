@@ -237,11 +237,7 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
     if (!mounted) return;
 
     if (!ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('사장님 게시판 글쓰기는 사업자 인증 후 이용할 수 있습니다.'),
-        ),
-      );
+      _showOwnerLockedSheet();
       return;
     }
 
@@ -277,6 +273,13 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
   }
 
   Future<void> _openPostDetail(Post p) async {
+    final verified = c.isOwnerVerified.value;
+
+    if (!verified) {
+      _showOwnerLockedSheet();
+      return;
+    }
+
     unawaited(Future<void>(() async {
       await _precacheImages(p);
     }));
@@ -287,6 +290,20 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
       await c.initLoad();
       await c.refreshOwnerVerification();
     }
+  }
+
+  void _showOwnerLockedSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) {
+        return const _OwnerLockedSheet();
+      },
+    );
   }
 
   @override
@@ -300,12 +317,6 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
             onTapIndustry: _openIndustryMultiSelectSheet,
             onTapRegion: _openRegionSheet,
           ),
-          Obx(() {
-            final verified = c.isOwnerVerified.value;
-            return _OwnerBoardNoticeBar(
-              verified: verified,
-            );
-          }),
           const Divider(height: 1, thickness: 1, color: Color(0xFFF1F3F5)),
           Expanded(
             child: Obx(() {
@@ -321,6 +332,8 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
               if (list.isEmpty) {
                 return const _OwnerBoardEmptyBody();
               }
+
+              final verified = c.isOwnerVerified.value;
 
               return RefreshIndicator(
                 onRefresh: () async {
@@ -358,6 +371,8 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
                       onTap: () => _openPostDetail(p),
                       onLike: () => c.toggleLikeOnList(p),
                       liked: p.likedUserIds.contains(c.currentUserId),
+                      obscurePreview: !verified,
+                      obscureThumbnail: !verified,
                     );
                   },
                 ),
@@ -366,24 +381,32 @@ class _OwnerBoardScreenState extends State<OwnerBoardScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _goWrite,
-        backgroundColor: kCommunityAccent,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        extendedPadding: const EdgeInsets.symmetric(horizontal: 14),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(999),
-        ),
-        label: const Text(
-          '글쓰기',
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.1,
+      floatingActionButton: Obx(() {
+        final verified = c.isOwnerVerified.value;
+
+        return FloatingActionButton.extended(
+          onPressed: _goWrite,
+          backgroundColor: verified ? kCommunityAccent : const Color(0xFFB6A79F),
+          foregroundColor: Colors.white,
+          elevation: 0,
+          extendedPadding: const EdgeInsets.symmetric(horizontal: 14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(999),
           ),
-        ),
-      ),
+          icon: Icon(
+            verified ? Icons.edit_rounded : Icons.lock_outline_rounded,
+            size: 17,
+          ),
+          label: Text(
+            verified ? '글쓰기' : '인증 필요',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -0.1,
+            ),
+          ),
+        );
+      }),
     );
   }
 
@@ -455,9 +478,8 @@ class _OwnerBoardToolbar extends StatelessWidget {
 
                   final isSingle = ids.length == 1;
                   final singleId = isSingle ? ids.first : null;
-                  final item = singleId != null
-                      ? IndustryCatalog.byId(singleId)
-                      : null;
+                  final item =
+                      singleId != null ? IndustryCatalog.byId(singleId) : null;
                   final label = _selectedIndustryLabel(ids);
 
                   return Padding(
@@ -644,38 +666,6 @@ class _SelectedFilterChip extends StatelessWidget {
   }
 }
 
-class _OwnerBoardNoticeBar extends StatelessWidget {
-  final bool verified;
-
-  const _OwnerBoardNoticeBar({
-    required this.verified,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      color: verified
-          ? const Color(0xFFF9FAFB)
-          : const Color(0xFFFFFBEB),
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-      child: Text(
-        verified
-            ? '사업자 인증 완료 · 사장님 게시판 글쓰기가 가능합니다.'
-            : '조회는 가능하지만 글쓰기는 사업자 인증 후 이용할 수 있습니다.',
-        style: TextStyle(
-          fontSize: 12.5,
-          fontWeight: FontWeight.w600,
-          height: 1.35,
-          color: verified
-              ? const Color(0xFF4B5563)
-              : const Color(0xFF7C5A03),
-        ),
-      ),
-    );
-  }
-}
-
 class _OwnerBoardEmptyBody extends StatelessWidget {
   const _OwnerBoardEmptyBody();
 
@@ -718,6 +708,108 @@ class _OwnerBoardErrorBody extends StatelessWidget {
             height: 1.4,
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _OwnerLockedSheet extends StatelessWidget {
+  const _OwnerLockedSheet();
+
+  void _goMyStoreTab(BuildContext context) {
+    Navigator.of(context).pop();
+
+    Get.offAllNamed(
+      AppRoutes.root,
+      arguments: const {
+        'initialIndex': 3,
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF6EEEA),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: const Icon(
+              Icons.lock_outline_rounded,
+              color: Color(0xFFA56E5F),
+              size: 24,
+            ),
+          ),
+          const SizedBox(height: 14),
+          const Text(
+            '사업자 인증 후 볼 수 있어요',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF111111),
+              letterSpacing: -0.4,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '사장님게시판의 본문, 이미지, 댓글은\n사업자 인증을 완료한 사용자만 확인할 수 있습니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF6B7280),
+              height: 1.45,
+              letterSpacing: -0.1,
+            ),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton(
+              onPressed: () => _goMyStoreTab(context),
+              style: ElevatedButton.styleFrom(
+                elevation: 0,
+                backgroundColor: kCommunityAccent,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              child: const Text(
+                '인증하러 가기',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            height: 44,
+            child: TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text(
+                '닫기',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF6B7280),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

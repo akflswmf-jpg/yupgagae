@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/auth/auth_controller.dart';
 import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_page.dart';
@@ -10,11 +11,13 @@ import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart'
 class HomeFeedController extends GetxController {
   final PostRepository repo;
   final AuthSessionService auth;
+  final AuthController authController;
   final StoreProfileRepository storeProfileRepo;
 
   HomeFeedController({
     required this.repo,
     required this.auth,
+    required this.authController,
     required this.storeProfileRepo,
   });
 
@@ -48,7 +51,8 @@ class HomeFeedController extends GetxController {
   Future<void>? _loadAllFuture;
 
   DateTime? _lastFullLoadAt;
-  DateTime? _lastOwnerVerificationAt;
+
+  late final Worker _ownerVerificationWorker;
 
   int _loadGeneration = 0;
 
@@ -60,7 +64,6 @@ class HomeFeedController extends GetxController {
   static const int _hotCommentWeight = 4;
 
   static const Duration _staleAfter = Duration(seconds: 30);
-  static const Duration _ownerVerificationStaleAfter = Duration(minutes: 2);
 
   String get currentUserId => auth.currentUserId;
 
@@ -93,7 +96,21 @@ class HomeFeedController extends GetxController {
   @override
   void onInit() {
     super.onInit();
+
+    refreshOwnerVerification();
+
+    _ownerVerificationWorker = ever(
+      authController.currentUser,
+      (_) => refreshOwnerVerification(),
+    );
+
     loadAll();
+  }
+
+  @override
+  void onClose() {
+    _ownerVerificationWorker.dispose();
+    super.onClose();
   }
 
   Future<void> loadAll() {
@@ -128,8 +145,9 @@ class HomeFeedController extends GetxController {
 
     error.value = null;
 
+    refreshOwnerVerification();
+
     await Future.wait<void>([
-      _refreshOwnerVerificationIfStale(force: true),
       loadTop(generation: generation),
       refreshLatest(generation: generation),
       refreshUsedLatest(generation: generation),
@@ -141,28 +159,9 @@ class HomeFeedController extends GetxController {
     }
   }
 
-  Future<void> _refreshOwnerVerificationIfStale({
-    bool force = false,
-  }) async {
-    final last = _lastOwnerVerificationAt;
-
-    if (!force &&
-        last != null &&
-        DateTime.now().difference(last) < _ownerVerificationStaleAfter) {
-      return;
-    }
-
-    await refreshOwnerVerification();
-  }
-
-  Future<void> refreshOwnerVerification() async {
-    try {
-      final profile = await storeProfileRepo.fetchProfile();
-      isOwnerVerified.value = profile.isOwnerVerified;
-      _lastOwnerVerificationAt = DateTime.now();
-    } catch (_) {
-      isOwnerVerified.value = false;
-    }
+  void refreshOwnerVerification() {
+    isOwnerVerified.value =
+        authController.currentUser.value?.isBusinessVerified ?? false;
   }
 
   Future<void> loadTop({

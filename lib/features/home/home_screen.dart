@@ -559,7 +559,7 @@ class _LockedOwnerNotice extends StatelessWidget {
           const SizedBox(width: 10),
           const Expanded(
             child: Text(
-              '사장님 인증 사용자만 열람 가능합니다.',
+              '사업자 인증 사용자만 열람 가능합니다.',
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w700,

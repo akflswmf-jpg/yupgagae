@@ -1,20 +1,18 @@
-import 'dart:async';
-
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/auth/auth_controller.dart';
 import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/features/community/controller/post_list_controller.dart';
 import 'package:yupgagae/features/community/domain/post.dart';
 import 'package:yupgagae/features/community/domain/post_repository.dart';
-import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart';
 
 class OwnerBoardController extends PostListController {
-  final StoreProfileRepository storeProfileRepo;
+  final AuthController authController;
 
   OwnerBoardController({
     required PostRepository repo,
     required AuthSessionService auth,
-    required this.storeProfileRepo,
+    required this.authController,
   }) : super(
           repo: repo,
           auth: auth,
@@ -26,66 +24,52 @@ class OwnerBoardController extends PostListController {
   final accessError = RxnString();
 
   bool _prewarmStarted = false;
-  Future<void>? _accessFuture;
 
-  int _accessGeneration = 0;
+  late final Worker _ownerVerificationWorker;
 
   Future<void> prewarm() async {
     if (_prewarmStarted) return;
     _prewarmStarted = true;
 
     await ensureFeedInitialized();
-
-    unawaited(refreshOwnerVerification());
+    refreshOwnerVerification();
   }
 
-  Future<void> refreshOwnerVerification() {
-    _accessFuture ??= _refreshOwnerVerificationInternal().whenComplete(() {
-      _accessFuture = null;
-    });
+  @override
+  void onInit() {
+    super.onInit();
 
-    return _accessFuture!;
+    refreshOwnerVerification();
+
+    _ownerVerificationWorker = ever(
+      authController.currentUser,
+      (_) => refreshOwnerVerification(),
+    );
   }
 
-  Future<void> _refreshOwnerVerificationInternal() async {
-    final generation = ++_accessGeneration;
+  @override
+  void onClose() {
+    _ownerVerificationWorker.dispose();
+    super.onClose();
+  }
 
+  Future<void> refreshOwnerVerification() async {
     isAccessLoading.value = true;
     accessError.value = null;
 
     try {
-      final profile = await storeProfileRepo.fetchProfile();
-
-      if (!_isCurrentAccessRequest(generation)) {
-        return;
-      }
-
-      isOwnerVerified.value = profile.isOwnerVerified;
+      isOwnerVerified.value =
+          authController.currentUser.value?.isBusinessVerified ?? false;
     } catch (e) {
-      if (!_isCurrentAccessRequest(generation)) {
-        return;
-      }
-
       isOwnerVerified.value = false;
       accessError.value = e.toString();
     } finally {
-      if (_isCurrentAccessRequest(generation)) {
-        isAccessLoading.value = false;
-      }
+      isAccessLoading.value = false;
     }
   }
 
   Future<bool> canWriteOwnerPost() async {
-    try {
-      await refreshOwnerVerification();
-      return isOwnerVerified.value;
-    } catch (_) {
-      isOwnerVerified.value = false;
-      return false;
-    }
-  }
-
-  bool _isCurrentAccessRequest(int generation) {
-    return _accessGeneration == generation;
+    await refreshOwnerVerification();
+    return isOwnerVerified.value;
   }
 }

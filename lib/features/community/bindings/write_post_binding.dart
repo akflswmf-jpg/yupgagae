@@ -1,5 +1,6 @@
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/auth/auth_controller.dart';
 import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/core/navigation/route_input_resolver.dart';
 import 'package:yupgagae/features/community/controller/write_post_controller.dart';
@@ -26,6 +27,7 @@ class WritePostBinding extends Bindings {
         () => WritePostController(
           repo: Get.find<PostRepository>(),
           auth: Get.find<AuthSessionService>(),
+          authController: Get.find<AuthController>(),
           storeProfileRepo: Get.find<StoreProfileRepository>(),
           editingPostId: postId,
           initialBoardType: initialBoardType,
@@ -39,6 +41,12 @@ class WritePostBinding extends Bindings {
     if (!Get.isRegistered<AuthSessionService>()) {
       throw Exception(
         'AuthSessionService must be registered by RootBinding before WritePostBinding.',
+      );
+    }
+
+    if (!Get.isRegistered<AuthController>()) {
+      throw Exception(
+        'AuthController must be registered by RootBinding before WritePostBinding.',
       );
     }
 

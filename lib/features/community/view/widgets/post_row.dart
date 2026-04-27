@@ -16,6 +16,16 @@ class PostRow extends StatelessWidget {
   final VoidCallback onLike;
   final bool liked;
 
+  /// 사장님게시판 미인증 사용자용.
+  /// true면 본문 미리보기 대신 잠금 문구를 표시한다.
+  final bool obscurePreview;
+
+  /// 사장님게시판 미인증 사용자용.
+  /// true면 썸네일 이미지를 숨긴다.
+  final bool obscureThumbnail;
+
+  final String lockedPreviewText;
+
   const PostRow({
     super.key,
     required this.post,
@@ -23,6 +33,9 @@ class PostRow extends StatelessWidget {
     required this.onTap,
     required this.onLike,
     required this.liked,
+    this.obscurePreview = false,
+    this.obscureThumbnail = false,
+    this.lockedPreviewText = '사업자 인증 후 본문을 볼 수 있어요.',
   });
 
   String _usedPrefix() {
@@ -50,6 +63,10 @@ class PostRow extends StatelessWidget {
   }) {
     if (isBlind) return '블라인드 처리된 게시글입니다.';
 
+    if (obscurePreview) {
+      return lockedPreviewText;
+    }
+
     final normalized = body.trim().replaceAll('\n', ' ');
     if (normalized.length <= 88) return normalized;
     return '${normalized.substring(0, 88)}...';
@@ -64,7 +81,9 @@ class PostRow extends StatelessWidget {
       isBlind: isBlind,
       body: post.body,
     );
-    final thumbPath = post.imagePaths.isNotEmpty ? post.imagePaths.first : null;
+
+    final rawThumbPath = post.imagePaths.isNotEmpty ? post.imagePaths.first : null;
+    final thumbPath = (isBlind || obscureThumbnail) ? null : rawThumbPath;
 
     final likeColor = liked ? _accentColor : _mutedTextColor;
 
@@ -95,8 +114,9 @@ class PostRow extends StatelessWidget {
                     prefix: prefix,
                     title: title,
                     preview: preview,
-                    thumbPath: isBlind ? null : thumbPath,
+                    thumbPath: thumbPath,
                     isSold: post.isSold,
+                    isLockedPreview: obscurePreview && !isBlind,
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -135,6 +155,7 @@ class _PostMainBlock extends StatelessWidget {
   final String preview;
   final String? thumbPath;
   final bool isSold;
+  final bool isLockedPreview;
 
   const _PostMainBlock({
     required this.prefix,
@@ -142,6 +163,7 @@ class _PostMainBlock extends StatelessWidget {
     required this.preview,
     required this.thumbPath,
     required this.isSold,
+    required this.isLockedPreview,
   });
 
   @override
@@ -157,6 +179,7 @@ class _PostMainBlock extends StatelessWidget {
               title: title,
               preview: preview,
               isSold: isSold,
+              isLockedPreview: isLockedPreview,
             ),
           ),
           if (thumbPath != null) ...[
@@ -174,12 +197,14 @@ class _PostTextBlock extends StatelessWidget {
   final String title;
   final String preview;
   final bool isSold;
+  final bool isLockedPreview;
 
   const _PostTextBlock({
     required this.prefix,
     required this.title,
     required this.preview,
     required this.isSold,
+    required this.isLockedPreview,
   });
 
   @override
@@ -197,17 +222,38 @@ class _PostTextBlock extends StatelessWidget {
         ),
         if (hasPreview) ...[
           const SizedBox(height: 12),
-          Text(
-            preview,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 13,
-              color: Color(0xFF6B7280),
-              height: 1.38,
-              fontWeight: FontWeight.w500,
-              letterSpacing: -0.1,
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (isLockedPreview) ...[
+                const Padding(
+                  padding: EdgeInsets.only(top: 1),
+                  child: Icon(
+                    Icons.lock_outline_rounded,
+                    size: 15,
+                    color: Color(0xFFA56E5F),
+                  ),
+                ),
+                const SizedBox(width: 5),
+              ],
+              Expanded(
+                child: Text(
+                  preview,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: isLockedPreview
+                        ? const Color(0xFFA56E5F)
+                        : const Color(0xFF6B7280),
+                    height: 1.38,
+                    fontWeight:
+                        isLockedPreview ? FontWeight.w800 : FontWeight.w500,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ],

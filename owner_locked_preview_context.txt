@@ -1,10 +1,496 @@
+﻿
+================================================
+FILE_PATH: lib/features/community/view/widgets/post_row.dart
+================================================
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+
+import 'package:yupgagae/features/community/domain/post.dart';
+import 'package:yupgagae/features/community/view/widgets/author_meta_line.dart';
+
+class PostRow extends StatelessWidget {
+  static const Color _accentColor = Color(0xFFA56E5F);
+  static const Color _normalTextColor = Color(0xFF111111);
+  static const Color _mutedTextColor = Color(0xFF6B7280);
+
+  final Post post;
+  final String timeLabel;
+  final VoidCallback onTap;
+  final VoidCallback onLike;
+  final bool liked;
+
+  const PostRow({
+    super.key,
+    required this.post,
+    required this.timeLabel,
+    required this.onTap,
+    required this.onLike,
+    required this.liked,
+  });
+
+  String _usedPrefix() {
+    if (post.boardType != BoardType.used || post.usedType == null) {
+      return '';
+    }
+
+    switch (post.usedType!) {
+      case UsedPostType.store:
+        return '[가게양도]';
+      case UsedPostType.item:
+        return '[중고거래]';
+    }
+  }
+
+  String _safeTitle(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return '(제목 없음)';
+    return trimmed;
+  }
+
+  String _safePreview({
+    required bool isBlind,
+    required String body,
+  }) {
+    if (isBlind) return '블라인드 처리된 게시글입니다.';
+
+    final normalized = body.trim().replaceAll('\n', ' ');
+    if (normalized.length <= 88) return normalized;
+    return '${normalized.substring(0, 88)}...';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isBlind = post.isReportThresholdReached;
+    final prefix = isBlind ? '' : _usedPrefix();
+    final title = isBlind ? '블라인드 처리된 게시글입니다.' : _safeTitle(post.title);
+    final preview = _safePreview(
+      isBlind: isBlind,
+      body: post.body,
+    );
+    final thumbPath = post.imagePaths.isNotEmpty ? post.imagePaths.first : null;
+
+    final likeColor = liked ? _accentColor : _mutedTextColor;
+
+    return RepaintBoundary(
+      child: Opacity(
+        opacity: post.isSold ? 0.72 : 1,
+        child: Material(
+          color: Colors.white,
+          child: InkWell(
+            onTap: onTap,
+            splashColor: const Color(0x08000000),
+            highlightColor: const Color(0x04000000),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AuthorMetaLine(
+                    industryId: post.industryId,
+                    locationLabel: post.locationLabel,
+                    nicknameLabel: post.authorLabel,
+                    timeLabel: timeLabel,
+                    isOwnerVerified: post.isOwnerVerified,
+                    dense: true,
+                  ),
+                  const SizedBox(height: 8),
+                  _PostMainBlock(
+                    prefix: prefix,
+                    title: title,
+                    preview: preview,
+                    thumbPath: isBlind ? null : thumbPath,
+                    isSold: post.isSold,
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      _MetaLabel(
+                        icon: Icons.remove_red_eye_outlined,
+                        text: '${post.viewCount}',
+                      ),
+                      const SizedBox(width: 12),
+                      _MetaLabel(
+                        icon: Icons.mode_comment_outlined,
+                        text: '${post.commentCount}',
+                      ),
+                      const SizedBox(width: 12),
+                      _LikeButton(
+                        liked: liked,
+                        likeCount: post.likeCount,
+                        color: likeColor,
+                        onTap: onLike,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PostMainBlock extends StatelessWidget {
+  final String prefix;
+  final String title;
+  final String preview;
+  final String? thumbPath;
+  final bool isSold;
+
+  const _PostMainBlock({
+    required this.prefix,
+    required this.title,
+    required this.preview,
+    required this.thumbPath,
+    required this.isSold,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 72),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: _PostTextBlock(
+              prefix: prefix,
+              title: title,
+              preview: preview,
+              isSold: isSold,
+            ),
+          ),
+          if (thumbPath != null) ...[
+            const SizedBox(width: 12),
+            _Thumb(path: thumbPath!),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PostTextBlock extends StatelessWidget {
+  final String prefix;
+  final String title;
+  final String preview;
+  final bool isSold;
+
+  const _PostTextBlock({
+    required this.prefix,
+    required this.title,
+    required this.preview,
+    required this.isSold,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasPreview = preview.trim().isNotEmpty;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _PostTitleLine(
+          prefix: prefix,
+          title: title,
+          isSold: isSold,
+        ),
+        if (hasPreview) ...[
+          const SizedBox(height: 12),
+          Text(
+            preview,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 13,
+              color: Color(0xFF6B7280),
+              height: 1.38,
+              fontWeight: FontWeight.w500,
+              letterSpacing: -0.1,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _PostTitleLine extends StatelessWidget {
+  static const Color _accentColor = Color(0xFFA56E5F);
+  static const Color _titleColor = Color(0xFF111111);
+
+  final String prefix;
+  final String title;
+  final bool isSold;
+
+  const _PostTitleLine({
+    required this.prefix,
+    required this.title,
+    required this.isSold,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasPrefix = prefix.trim().isNotEmpty;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        if (isSold) ...[
+          const _SoldBadge(),
+          const SizedBox(width: 6),
+        ],
+        Expanded(
+          child: Text.rich(
+            TextSpan(
+              children: [
+                if (hasPrefix)
+                  TextSpan(
+                    text: '$prefix ',
+                    style: const TextStyle(
+                      color: _accentColor,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                TextSpan(
+                  text: title,
+                  style: const TextStyle(
+                    color: _titleColor,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 15,
+              height: 1.28,
+              letterSpacing: -0.1,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SoldBadge extends StatelessWidget {
+  static const Color _soldTextColor = Color(0xFF8A4F43);
+  static const Color _soldBgColor = Color(0xFFF6EEEA);
+  static const Color _soldBorderColor = Color(0xFFE8D8D2);
+
+  const _SoldBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 20,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: _soldBgColor,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: _soldBorderColor),
+      ),
+      alignment: Alignment.center,
+      child: const Text(
+        '거래완료',
+        maxLines: 1,
+        overflow: TextOverflow.visible,
+        style: TextStyle(
+          fontSize: 11,
+          height: 1,
+          fontWeight: FontWeight.w900,
+          color: _soldTextColor,
+          letterSpacing: -0.2,
+        ),
+      ),
+    );
+  }
+}
+
+class _Thumb extends StatelessWidget {
+  final String path;
+
+  const _Thumb({required this.path});
+
+  ImageProvider _provider(File file) {
+    return ResizeImage(
+      FileImage(file),
+      width: 160,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final file = File(path);
+
+    if (!file.existsSync()) {
+      return const _ErrorThumb();
+    }
+
+    return RepaintBoundary(
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 72,
+          height: 72,
+          decoration: BoxDecoration(
+            color: const Color(0xFFF3F4F6),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+          ),
+          child: Image(
+            image: _provider(file),
+            fit: BoxFit.cover,
+            filterQuality: FilterQuality.none,
+            gaplessPlayback: true,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorThumb extends StatelessWidget {
+  const _ErrorThumb();
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox(
+      width: 72,
+      height: 72,
+      child: Center(
+        child: Icon(
+          Icons.image_not_supported_outlined,
+          size: 18,
+          color: Color(0xFF9CA3AF),
+        ),
+      ),
+    );
+  }
+}
+
+class _LikeButton extends StatelessWidget {
+  final bool liked;
+  final int likeCount;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _LikeButton({
+    required this.liked,
+    required this.likeCount,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 3),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              liked ? Icons.favorite : Icons.favorite_border,
+              size: 16,
+              color: color,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '$likeCount',
+              style: TextStyle(
+                fontSize: 12,
+                color: color,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MetaLabel extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _MetaLabel({
+    required this.icon,
+    required this.text,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF6B7280);
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 15, color: color),
+        const SizedBox(width: 4),
+        Text(
+          text,
+          style: const TextStyle(
+            fontSize: 12,
+            color: color,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// END_OF_FILE: lib/features/community/view/widgets/post_row.dart
+
+================================================
+FILE_PATH: lib/features/community/view/open_post_detail.dart
+================================================
+import 'package:get/get.dart';
+
+import 'package:yupgagae/features/community/bindings/post_detail_binding.dart';
+import 'package:yupgagae/features/community/view/post_detail_screen.dart';
+import 'package:yupgagae/routes/app_routes.dart';
+
+Future<T?> openPostDetail<T>(
+  String postId, {
+  dynamic result,
+}) async {
+  final trimmedPostId = postId.trim();
+  if (trimmedPostId.isEmpty) {
+    throw ArgumentError('postId required');
+  }
+
+  return Get.to<T>(
+    () => PostDetailScreen(postId: trimmedPostId),
+    binding: PostDetailBinding(),
+    routeName: AppRoutes.postDetail,
+    arguments: {
+      'postId': trimmedPostId,
+      if (result != null) 'result': result,
+    },
+  );
+}
+
+// END_OF_FILE: lib/features/community/view/open_post_detail.dart
+
+================================================
+FILE_PATH: lib/features/community/view/post_detail_screen.dart
+================================================
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 
-import 'package:yupgagae/core/auth/auth_controller.dart';
 import 'package:yupgagae/features/community/controller/comment_controller.dart';
 import 'package:yupgagae/features/community/controller/post_detail_controller.dart';
 import 'package:yupgagae/features/community/domain/comment.dart';
@@ -39,8 +525,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   late final ScrollController _scrollController;
   late final MyStoreController myStoreC;
 
-  AuthController? authC;
-
   final TextEditingController _commentCtrl = TextEditingController();
   final FocusNode _commentFocusNode = FocusNode();
 
@@ -62,10 +546,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     commentC = Get.find<CommentController>();
     myStoreC = Get.find<MyStoreController>();
     _scrollController = ScrollController();
-
-    if (Get.isRegistered<AuthController>()) {
-      authC = Get.find<AuthController>();
-    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _boot();
@@ -91,9 +571,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
         _bootError = null;
       });
 
-      if (!_isCurrentOwnerPostLocked()) {
-        unawaited(_startCommentBoot());
-      }
+      unawaited(_startCommentBoot());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -115,30 +593,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
       _commentBootDone = true;
       setState(() {});
     }
-  }
-
-  bool _isCurrentOwnerPostLocked() {
-    final post = c.post.value;
-    if (post == null) return false;
-    return _isOwnerPostLocked(post);
-  }
-
-  bool _isOwnerPostLocked(Post post) {
-    if (post.boardType != BoardType.owner) return false;
-
-    final auth = authC;
-    if (auth == null) return true;
-
-    return !(auth.currentUser.value?.isBusinessVerified ?? false);
-  }
-
-  void _goMyStoreTab() {
-    Get.offAllNamed(
-      AppRoutes.root,
-      arguments: const {
-        'initialIndex': 3,
-      },
-    );
   }
 
   @override
@@ -206,11 +660,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   }
 
   Future<void> _submitComment() async {
-    if (_isCurrentOwnerPostLocked()) {
-      _showSnack('사업자 인증 후 댓글을 작성할 수 있습니다.');
-      return;
-    }
-
     final text = _commentCtrl.text.trim();
     if (text.isEmpty) return;
     if (_isSubmittingLocal.value) return;
@@ -264,11 +713,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     required String commentId,
     String? editingCommentId,
   }) async {
-    if (_isCurrentOwnerPostLocked()) {
-      _showSnack('사업자 인증 후 댓글을 확인할 수 있습니다.');
-      return;
-    }
-
     final rootId = commentC.resolveReplyRootId(commentId);
 
     await _settleKeyboard();
@@ -594,7 +1038,9 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
             onPressed: toggling ? null : _onToggleSold,
             icon: Icon(
               sold ? Icons.check_circle : Icons.check_circle_outline,
-              color: sold ? const Color(0xFFA56E5F) : const Color(0xFF111111),
+              color: sold
+                  ? const Color(0xFFA56E5F)
+                  : const Color(0xFF111111),
             ),
           );
         }),
@@ -660,190 +1106,12 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
           final post = c.post.value;
           if (post == null) return const SizedBox.shrink();
 
-          if (_isOwnerPostLocked(post)) {
-            return const SizedBox.shrink();
-          }
-
           return Row(
             mainAxisSize: MainAxisSize.min,
             children: c.isOwner ? _buildOwnerActions(post) : _buildGuestActions(),
           );
         }),
       ],
-    );
-  }
-
-  Widget _buildLockedOwnerBody() {
-    return SafeArea(
-      top: false,
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 54,
-                height: 54,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF6EEEA),
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: const Icon(
-                  Icons.lock_outline_rounded,
-                  size: 27,
-                  color: Color(0xFFA56E5F),
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                '사업자 인증 후 볼 수 있어요',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF111111),
-                  letterSpacing: -0.5,
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                '사장님게시판의 본문, 이미지, 댓글은\n사업자 인증을 완료한 사용자만 확인할 수 있습니다.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 14,
-                  height: 1.5,
-                  color: Color(0xFF6B7280),
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.1,
-                ),
-              ),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ElevatedButton(
-                  onPressed: _goMyStoreTab,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFA56E5F),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: const Text(
-                    '인증하러 가기',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                height: 44,
-                child: TextButton(
-                  onPressed: () => Get.back(result: false),
-                  child: const Text(
-                    '목록으로 돌아가기',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF6B7280),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildUnlockedDetailBody() {
-    return SafeArea(
-      top: false,
-      bottom: false,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            bottom: 56,
-            child: RepaintBoundary(
-              child: Stack(
-                children: [
-                  PostDetailBody(
-                    c: c,
-                    commentC: commentC,
-                    scrollController: _scrollController,
-                    timeLabel: _timeLabel,
-                    onCommentTap: () {
-                      if (!_commentBootDone) return;
-                      if (_isSubmittingLocal.value) return;
-
-                      _commentFocusNode.requestFocus();
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (!mounted) return;
-                        _scrollToBottom(animated: false);
-                      });
-                    },
-                    onReplyTap: _onReplyTap,
-                    onEditTap: _onEditTap,
-                    activeReplyId: null,
-                    activeEditingId: null,
-                    onDelete: _onDelete,
-                    onReport: _onReport,
-                    onLikeTap: c.toggleLike,
-                  ),
-                  if (!_commentBootDone)
-                    const Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: LinearProgressIndicator(
-                        minHeight: 2,
-                        color: kCommentAccentDark,
-                        backgroundColor: Color(0xFFEDE7E3),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: Obx(() {
-              if (_isSubmittingLocal.value) {
-                return const SizedBox.shrink();
-              }
-
-              return _KeyboardInsetFollower(
-                child: _BottomCommentBar(
-                  controller: _commentCtrl,
-                  focusNode: _commentFocusNode,
-                  isSubmitting: _isSubmittingLocal,
-                  isCommentReady: _commentBootDone,
-                  onSubmit: _submitComment,
-                ),
-              );
-            }),
-          ),
-          Positioned.fill(
-            child: Obx(() {
-              if (!_isSubmittingLocal.value) {
-                return const SizedBox.shrink();
-              }
-
-              return const _CommentSubmitOverlay();
-            }),
-          ),
-        ],
-      ),
     );
   }
 
@@ -863,20 +1131,94 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
       );
     }
 
-    return Obx(() {
-      final post = c.post.value;
-      final locked = post != null && _isOwnerPostLocked(post);
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: _dismissKeyboard,
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        appBar: _buildAppBar(),
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                bottom: 56,
+                child: RepaintBoundary(
+                  child: Stack(
+                    children: [
+                      PostDetailBody(
+                        c: c,
+                        commentC: commentC,
+                        scrollController: _scrollController,
+                        timeLabel: _timeLabel,
+                        onCommentTap: () {
+                          if (!_commentBootDone) return;
+                          if (_isSubmittingLocal.value) return;
 
-      return GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: _dismissKeyboard,
-        child: Scaffold(
-          resizeToAvoidBottomInset: false,
-          appBar: _buildAppBar(),
-          body: locked ? _buildLockedOwnerBody() : _buildUnlockedDetailBody(),
+                          _commentFocusNode.requestFocus();
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            _scrollToBottom(animated: false);
+                          });
+                        },
+                        onReplyTap: _onReplyTap,
+                        onEditTap: _onEditTap,
+                        activeReplyId: null,
+                        activeEditingId: null,
+                        onDelete: _onDelete,
+                        onReport: _onReport,
+                        onLikeTap: c.toggleLike,
+                      ),
+                      if (!_commentBootDone)
+                        const Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: LinearProgressIndicator(
+                            minHeight: 2,
+                            color: kCommentAccentDark,
+                            backgroundColor: Color(0xFFEDE7E3),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Obx(() {
+                  if (_isSubmittingLocal.value) {
+                    return const SizedBox.shrink();
+                  }
+
+                  return _KeyboardInsetFollower(
+                    child: _BottomCommentBar(
+                      controller: _commentCtrl,
+                      focusNode: _commentFocusNode,
+                      isSubmitting: _isSubmittingLocal,
+                      isCommentReady: _commentBootDone,
+                      onSubmit: _submitComment,
+                    ),
+                  );
+                }),
+              ),
+              Positioned.fill(
+                child: Obx(() {
+                  if (!_isSubmittingLocal.value) {
+                    return const SizedBox.shrink();
+                  }
+
+                  return const _CommentSubmitOverlay();
+                }),
+              ),
+            ],
+          ),
         ),
-      );
-    });
+      ),
+    );
   }
 }
 
@@ -1040,3 +1382,5 @@ class _BottomCommentBar extends StatelessWidget {
     );
   }
 }
+
+// END_OF_FILE: lib/features/community/view/post_detail_screen.dart

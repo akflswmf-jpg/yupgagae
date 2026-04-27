@@ -5,6 +5,7 @@ import 'package:get/get.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'package:yupgagae/core/auth/auth_controller.dart';
 import 'package:yupgagae/core/auth/auth_session_service.dart';
 import 'package:yupgagae/core/image/app_image_provider_resolver.dart';
 import 'package:yupgagae/features/community/domain/industry_catalog.dart';
@@ -24,6 +25,7 @@ class WritePostController extends GetxController {
 
   final PostRepository repo;
   final AuthSessionService auth;
+  final AuthController authController;
   final StoreProfileRepository storeProfileRepo;
 
   final String? editingPostId;
@@ -32,6 +34,7 @@ class WritePostController extends GetxController {
   WritePostController({
     required this.repo,
     required this.auth,
+    required this.authController,
     required this.storeProfileRepo,
     this.editingPostId,
     this.initialBoardType = BoardType.free,
@@ -57,6 +60,10 @@ class WritePostController extends GetxController {
 
   BoardType get boardType => _resolvedBoardType;
   bool get isUsedBoard => _resolvedBoardType == BoardType.used;
+
+  bool get _isBusinessVerified {
+    return authController.currentUser.value?.isBusinessVerified ?? false;
+  }
 
   @override
   void onInit() {
@@ -366,6 +373,28 @@ class WritePostController extends GetxController {
     return true;
   }
 
+  bool _canCreateInCurrentBoard() {
+    switch (_resolvedBoardType) {
+      case BoardType.owner:
+        return _isBusinessVerified;
+      case BoardType.used:
+        return _isBusinessVerified;
+      case BoardType.free:
+        return true;
+    }
+  }
+
+  String _permissionDeniedMessage() {
+    switch (_resolvedBoardType) {
+      case BoardType.owner:
+        return '사장님 게시판 글쓰기는 사업자 인증 후 이용할 수 있습니다.';
+      case BoardType.used:
+        return '거래게시판 글쓰기는 사업자 인증 후 이용할 수 있습니다.';
+      case BoardType.free:
+        return '글쓰기 권한이 없습니다.';
+    }
+  }
+
   Future<bool> submit() async {
     if (isSubmitting.value) return false;
     if (isLoadingEdit.value) return false;
@@ -390,12 +419,8 @@ class WritePostController extends GetxController {
       if (!isEditMode) {
         final profile = await storeProfileRepo.fetchProfile();
 
-        if ((_resolvedBoardType == BoardType.owner ||
-                _resolvedBoardType == BoardType.used) &&
-            !profile.isOwnerVerified) {
-          error.value = _resolvedBoardType == BoardType.owner
-              ? '사장님 게시판 글쓰기는 사업자 인증 후 이용할 수 있습니다.'
-              : '거래게시판 글쓰기는 사업자 인증 후 이용할 수 있습니다.';
+        if (!_canCreateInCurrentBoard()) {
+          error.value = _permissionDeniedMessage();
           return false;
         }
 

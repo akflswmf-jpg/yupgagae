@@ -1,8 +1,101 @@
+﻿
+================================================
+FILE_PATH: lib/main.dart
+================================================
+import 'dart:async';
+
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
+import 'package:get/get.dart';
+
+import 'app/bindings/root_binding.dart';
+import 'core/service/anon_session_service.dart';
+import 'core/theme/app_theme.dart';
+import 'core/ui/app_messenger.dart';
+import 'firebase_options.dart';
+import 'routes/app_pages.dart';
+import 'routes/app_routes.dart';
+
+Future<void> main() async {
+  final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+
+  // A안:
+  // Flutter SplashScreen을 따로 만들지 않는다.
+  // 네이티브 스플래시 하나만 유지하다가 RootShell 첫 프레임 이후 제거한다.
+  FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
+
+  // Firebase는 Auth/Firestore/Functions 등 서버 계층의 기준점이므로
+  // 앱 실행 전에 반드시 초기화한다.
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  // 익명 세션은 기존 Repository/Controller들이 의존하므로 runApp 전에 반드시 등록한다.
+  // 단, SharedPreferences/path_provider 선예열은 여기서 따로 하지 않는다.
+  // 첫 화면 진입 전 블로킹을 줄이기 위해 필수 초기화만 남긴다.
+  final anon = await AnonSessionService.load();
+  Get.put<AnonSessionService>(anon, permanent: true);
+
+  runApp(const YeopgaGaeApp());
+
+  // RootShell 첫 프레임이 그려진 뒤 네이티브 스플래시를 제거한다.
+  // 너무 빨리 remove하면 스플래시와 RootShell 사이에 빈 프레임이 보일 수 있다.
+  unawaited(_removeNativeSplashAfterRootFirstFrame());
+}
+
+Future<void> _removeNativeSplashAfterRootFirstFrame() async {
+  try {
+    await SchedulerBinding.instance.endOfFrame;
+
+    // 일부 Android 기기에서 첫 프레임 직후 테마 전환이 한 박자 늦는 경우가 있어
+    // 아주 짧게 한 번 더 양보한다.
+    await Future<void>.delayed(const Duration(milliseconds: 16));
+
+    FlutterNativeSplash.remove();
+  } catch (_) {
+    FlutterNativeSplash.remove();
+  }
+}
+
+class YeopgaGaeApp extends StatelessWidget {
+  const YeopgaGaeApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return GetMaterialApp(
+      scaffoldMessengerKey: AppMessenger.messengerKey,
+      debugShowCheckedModeBanner: false,
+      title: '옆가게',
+      theme: buildAppTheme(),
+      locale: const Locale('ko', 'KR'),
+      fallbackLocale: const Locale('ko', 'KR'),
+      supportedLocales: const [
+        Locale('ko', 'KR'),
+        Locale('en', 'US'),
+      ],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      initialBinding: RootBinding(),
+      initialRoute: AppRoutes.root,
+      getPages: AppPages.pages,
+    );
+  }
+}
+
+// END_OF_FILE: lib/main.dart
+
+================================================
+FILE_PATH: lib/root_shell.dart
+================================================
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
-import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:get/get.dart';
 
 import 'package:yupgagae/features/community/controller/home_feed_controller.dart';
@@ -20,12 +113,7 @@ class RootShell extends StatefulWidget {
 }
 
 class _RootShellState extends State<RootShell> {
-  static const int homeTabIndex = 0;
-  static const int communityTabIndex = 1;
-  static const int revenueTabIndex = 2;
-  static const int myStoreTabIndex = 3;
-
-  int index = _resolveInitialIndex();
+  int index = 0;
 
   late final List<Widget> pages;
 
@@ -33,44 +121,9 @@ class _RootShellState extends State<RootShell> {
 
   DateTime? _lastHomeSoftRefreshAt;
 
-  bool _nativeSplashRemoved = false;
-
   static const Color kYupgagaeAccent = Color(0xFFA56E5F);
   static const Color _backgroundColor = Colors.white;
   static const Duration _homeSoftRefreshCooldown = Duration(seconds: 30);
-
-  // 홈 초기 로딩을 너무 오래 기다리면 앱이 멈춘 것처럼 보일 수 있다.
-  // 그래서 "홈 준비를 우선 기다리되, 최대 대기 시간은 제한"한다.
-  static const Duration _homeStartupWaitLimit = Duration(milliseconds: 1200);
-
-  static int _resolveInitialIndex() {
-    final args = Get.arguments;
-
-    if (args is Map) {
-      final value = args['initialIndex'] ?? args['tabIndex'] ?? args['tab'];
-
-      if (value is int && value >= homeTabIndex && value <= myStoreTabIndex) {
-        return value;
-      }
-
-      if (value is String) {
-        switch (value.trim()) {
-          case 'home':
-            return homeTabIndex;
-          case 'community':
-            return communityTabIndex;
-          case 'revenue':
-            return revenueTabIndex;
-          case 'myStore':
-          case 'my_store':
-          case 'store':
-            return myStoreTabIndex;
-        }
-      }
-    }
-
-    return homeTabIndex;
-  }
 
   @override
   void initState() {
@@ -84,53 +137,11 @@ class _RootShellState extends State<RootShell> {
       const RevenueScreen(),
       const MyStoreScreen(),
     ];
-
-    unawaited(_removeNativeSplashWhenHomeIsReady());
-  }
-
-  Future<void> _removeNativeSplashWhenHomeIsReady() async {
-    if (_nativeSplashRemoved) return;
-    _nativeSplashRemoved = true;
-
-    try {
-      // 1) RootShell + HomeScreen이 실제로 트리에 붙을 첫 프레임까지 기다린다.
-      // HomeScreen initState에서 HomeFeedController가 생성되고 loadAll()이 시작된다.
-      await SchedulerBinding.instance.endOfFrame;
-
-      // 2) 홈 피드의 초기 데이터 로딩이 끝날 때까지 기다린다.
-      // HomeFeedController.loadAll()은 내부에서 _loadAllFuture를 재사용하므로
-      // 이미 onInit에서 시작된 로딩과 중복 충돌하지 않는다.
-      await _waitForHomeFeedInitialReady();
-
-      // 3) 로딩 결과가 Obx/ListView에 반영될 다음 프레임까지 한 번 더 기다린다.
-      await SchedulerBinding.instance.endOfFrame;
-
-      // 4) 일부 Android 기기에서 테마 전환/첫 페인트가 한 박자 늦는 경우를 위한 짧은 양보.
-      await Future<void>.delayed(const Duration(milliseconds: 16));
-
-      FlutterNativeSplash.remove();
-    } catch (_) {
-      FlutterNativeSplash.remove();
-    }
-  }
-
-  Future<void> _waitForHomeFeedInitialReady() async {
-    try {
-      final controller = Get.find<HomeFeedController>();
-
-      await controller.loadAll().timeout(
-            _homeStartupWaitLimit,
-            onTimeout: () async {},
-          );
-    } catch (_) {
-      // 홈 피드 준비 실패가 앱 진입 자체를 막으면 안 된다.
-      // 실패 시에도 스플래시는 제거하고 HomeScreen의 에러/빈 상태 UI에 맡긴다.
-    }
   }
 
   void _handleTap(int nextIndex) {
     if (index == nextIndex) {
-      if (nextIndex == homeTabIndex) {
+      if (nextIndex == 0) {
         _softRefreshHomeIfAllowed();
       }
       return;
@@ -140,7 +151,7 @@ class _RootShellState extends State<RootShell> {
       index = nextIndex;
     });
 
-    if (nextIndex == homeTabIndex) {
+    if (nextIndex == 0) {
       _softRefreshHomeIfAllowed();
     }
   }
@@ -276,3 +287,5 @@ class _RootShellState extends State<RootShell> {
     );
   }
 }
+
+// END_OF_FILE: lib/root_shell.dart
