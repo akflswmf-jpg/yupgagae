@@ -1,0 +1,412 @@
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/features/community/controller/comment_controller.dart';
+import 'package:yupgagae/features/community/controller/post_detail_controller.dart';
+import 'package:yupgagae/features/community/domain/comment.dart';
+import 'package:yupgagae/features/community/domain/post.dart';
+import 'package:yupgagae/features/community/view/widgets/post_detail_comments_section.dart';
+import 'package:yupgagae/features/community/view/widgets/post_detail_content_section.dart';
+
+class PostDetailBody extends StatelessWidget {
+  final PostDetailController c;
+  final CommentController commentC;
+  final ScrollController scrollController;
+  final String Function(DateTime) timeLabel;
+  final VoidCallback onCommentTap;
+  final Future<void> Function(String commentId) onReplyTap;
+  final Future<void> Function(String commentId, String currentText) onEditTap;
+  final String? activeReplyId;
+  final String? activeEditingId;
+  final Future<void> Function(Comment comment) onDelete;
+  final Future<void> Function(Comment comment) onReport;
+  final Future<void> Function() onLikeTap;
+  final Future<void> Function(Comment comment) onCommentLikeTap;
+
+  const PostDetailBody({
+    super.key,
+    required this.c,
+    required this.commentC,
+    required this.scrollController,
+    required this.timeLabel,
+    required this.onCommentTap,
+    required this.onReplyTap,
+    required this.onEditTap,
+    required this.activeReplyId,
+    required this.activeEditingId,
+    required this.onDelete,
+    required this.onReport,
+    required this.onLikeTap,
+    required this.onCommentLikeTap,
+  });
+
+  Widget _buildPostSliver() {
+    return Obx(() {
+      final Post? p = c.post.value;
+
+      if (p == null) {
+        if (c.isLoading.value) {
+          return const SliverFillRemaining(
+            hasScrollBody: false,
+            child: Center(
+              child: CircularProgressIndicator(),
+            ),
+          );
+        }
+
+        return const SliverFillRemaining(
+          hasScrollBody: false,
+          child: _DetailEmptyState(
+            title: '게시글을 불러올 수 없습니다.',
+            subtitle: '잠시 후 다시 시도해주세요.',
+          ),
+        );
+      }
+
+      if (p.isReportThresholdReached) {
+        return const SliverFillRemaining(
+          hasScrollBody: false,
+          child: _DetailEmptyState(
+            title: '블라인드 처리된 게시글입니다.',
+            subtitle: '신고 누적으로 인해 게시글을 볼 수 없습니다.',
+          ),
+        );
+      }
+
+      final userId = c.currentUserId;
+      final liked = userId.isNotEmpty && p.likedUserIds.contains(userId);
+
+      return SliverToBoxAdapter(
+        child: RepaintBoundary(
+          child: PostDetailContentSection(
+            post: p,
+            timeLabel: timeLabel(p.createdAt),
+            liked: liked,
+            likeColor: liked
+                ? const Color(0xFFA56E5F)
+                : const Color(0xFF9CA3AF),
+            onLikeTap: onLikeTap,
+            onCommentTap: onCommentTap,
+          ),
+        ),
+      );
+    });
+  }
+
+  Widget _buildCommentsHeaderSliver() {
+    return Obx(() {
+      final count = c.post.value?.commentCount ?? commentC.activeCommentCount;
+
+      return SliverToBoxAdapter(
+        child: Container(
+          width: double.infinity,
+          color: Colors.white,
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+          child: Row(
+            children: [
+              const Text(
+                '댓글',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF111111),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '$count',
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF6B7280),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    });
+  }
+
+  Widget _buildCommentsBodySliver() {
+    return Obx(() {
+      if (commentC.isLoading.value && commentC.flattenedComments.isEmpty) {
+        return const SliverToBoxAdapter(
+          child: SizedBox(height: 8),
+        );
+      }
+
+      final items = commentC.flattenedComments;
+      if (items.isEmpty) {
+        return const SliverToBoxAdapter(
+          child: _CommentsEmptyBox(),
+        );
+      }
+
+      final shouldShowMoreComments =
+          commentC.hasMoreComments.value || commentC.isLoadingMore.value;
+
+      return SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            if (index >= items.length) {
+              return _MoreCommentsButton(
+                isLoading: commentC.isLoadingMore.value,
+                onTap: commentC.loadMoreComments,
+              );
+            }
+
+            final item = items[index];
+
+            return RepaintBoundary(
+              key: ValueKey(item.comment.id),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PostDetailCommentItem(
+                    item: item,
+                    timeLabel: timeLabel,
+                    currentUserId: commentC.currentUserId,
+                    activeReplyId: activeReplyId,
+                    activeEditingId: activeEditingId,
+                    onReportComment: onReport,
+                    onReplyTap: (cm) async {
+                      await onReplyTap(cm.id);
+                    },
+                    onEditTap: (cm) async {
+                      await onEditTap(cm.id, cm.text);
+                    },
+                    onDeleteTap: onDelete,
+                    onToggleLikeTap: onCommentLikeTap,
+                  ),
+                  if (_shouldShowReplyMoreButton(
+                    item: item,
+                    items: items,
+                    itemIndex: index,
+                  ))
+                    _MoreRepliesButton(
+                      hiddenCount: commentC.hiddenReplyCountOf(
+                        item.comment.parentId ?? '',
+                      ),
+                      onTap: () {
+                        final parentId = item.comment.parentId?.trim();
+                        if (parentId == null || parentId.isEmpty) return;
+                        commentC.showMoreReplies(parentId);
+                      },
+                    ),
+                ],
+              ),
+            );
+          },
+          childCount: items.length + (shouldShowMoreComments ? 1 : 0),
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
+          addSemanticIndexes: false,
+        ),
+      );
+    });
+  }
+
+  bool _shouldShowReplyMoreButton({
+    required CommentViewItem item,
+    required List<CommentViewItem> items,
+    required int itemIndex,
+  }) {
+    if (item.depth != 1) return false;
+
+    final parentId = item.comment.parentId?.trim();
+    if (parentId == null || parentId.isEmpty) return false;
+
+    if (!commentC.hasMoreReplies(parentId)) return false;
+
+    final nextIndex = itemIndex + 1;
+    if (nextIndex >= items.length) return true;
+
+    final next = items[nextIndex];
+    if (next.depth == 0) return true;
+
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomScrollView(
+      controller: scrollController,
+      physics: const ClampingScrollPhysics(),
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      cacheExtent: 500,
+      slivers: [
+        _buildPostSliver(),
+        const SliverToBoxAdapter(
+          child: SizedBox(height: 20),
+        ),
+        const SliverToBoxAdapter(
+          child: ColoredBox(
+            color: Color(0xFFF9FAFB),
+            child: SizedBox(height: 8),
+          ),
+        ),
+        _buildCommentsHeaderSliver(),
+        _buildCommentsBodySliver(),
+        const SliverToBoxAdapter(
+          child: SizedBox(height: 24),
+        ),
+      ],
+    );
+  }
+}
+
+class _MoreCommentsButton extends StatelessWidget {
+  final bool isLoading;
+  final VoidCallback onTap;
+
+  const _MoreCommentsButton({
+    required this.isLoading,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+      child: Center(
+        child: TextButton(
+          onPressed: isLoading ? null : onTap,
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: Text(
+            isLoading ? '불러오는 중...' : '댓글 더보기',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFFA56E5F),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MoreRepliesButton extends StatelessWidget {
+  final int hiddenCount;
+  final VoidCallback onTap;
+
+  const _MoreRepliesButton({
+    required this.hiddenCount,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final countText = hiddenCount > CommentController.replyPreviewSize
+        ? '${CommentController.replyPreviewSize}개'
+        : '$hiddenCount개';
+
+    return Container(
+      width: double.infinity,
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(48, 6, 16, 12),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: onTap,
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 5),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: const Icon(
+            Icons.subdirectory_arrow_right_rounded,
+            size: 15,
+            color: Color(0xFFA56E5F),
+          ),
+          label: Text(
+            '답글 $countText 더보기',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFFA56E5F),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CommentsEmptyBox extends StatelessWidget {
+  const _CommentsEmptyBox();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+      child: const Text(
+        '아직 댓글이 없습니다.',
+        style: TextStyle(
+          fontSize: 13,
+          color: Color(0xFF6B7280),
+          fontWeight: FontWeight.w500,
+          height: 1.5,
+        ),
+      ),
+    );
+  }
+}
+
+class _DetailEmptyState extends StatelessWidget {
+  final String title;
+  final String subtitle;
+
+  const _DetailEmptyState({
+    required this.title,
+    required this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.article_outlined,
+              size: 30,
+              color: Color(0xFF9CA3AF),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF111111),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 13,
+                color: Color(0xFF6B7280),
+                height: 1.45,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

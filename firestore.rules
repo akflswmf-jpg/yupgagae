@@ -1,0 +1,850 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function authLinkPath() {
+      return /databases/$(database)/documents/auth_links/$(request.auth.uid);
+    }
+
+    function hasAuthLink() {
+      return signedIn() && exists(authLinkPath());
+    }
+
+    function currentUserId() {
+      return hasAuthLink() ? get(authLinkPath()).data.userId : '';
+    }
+
+    function userPath(userId) {
+      return /databases/$(database)/documents/users/$(userId);
+    }
+
+    function userExists(userId) {
+      return userId is string
+        && userId.size() > 0
+        && exists(userPath(userId));
+    }
+
+    function userData(userId) {
+      return get(userPath(userId)).data;
+    }
+
+    function communityUserSanctionAllowed(data) {
+      return (
+        (
+          !data.keys().hasAny(['role'])
+          || data.role != 'banned'
+        )
+        && (
+          !data.keys().hasAny(['sanctionStatus'])
+          || data.sanctionStatus in ['normal', 'none', 'warned']
+          || (
+            data.sanctionStatus == 'suspended'
+            && data.keys().hasAny(['sanctionUntil'])
+            && data.sanctionUntil is timestamp
+            && data.sanctionUntil <= request.time
+          )
+        )
+      );
+    }
+
+    function isValidActiveUser(userId) {
+      return signedIn()
+        && userExists(userId)
+        && userData(userId).firebaseUid == request.auth.uid
+        && userData(userId).status == 'active'
+        && userData(userId).isDeleted == false
+        && userData(userId).profileSetupCompleted == true
+        && communityUserSanctionAllowed(userData(userId));
+    }
+
+    function isCurrentUser(userId) {
+      return hasAuthLink()
+        && userId is string
+        && userId == currentUserId()
+        && isValidActiveUser(userId);
+    }
+
+    function isAdmin() {
+      let uid = currentUserId();
+
+      return hasAuthLink()
+        && uid is string
+        && uid.size() > 0
+        && userExists(uid)
+        && userData(uid).firebaseUid == request.auth.uid
+        && userData(uid).status == 'active'
+        && userData(uid).isDeleted == false
+        && userData(uid).role == 'admin';
+    }
+
+    function isBusinessVerifiedUser(userId) {
+      return userExists(userId)
+        && userData(userId).keys().hasAny(['business'])
+        && userData(userId).business.keys().hasAny(['status'])
+        && userData(userId).business.status == 'verified';
+    }
+
+    function userNickname(userId) {
+      return userData(userId).keys().hasAny(['storeProfile'])
+        && userData(userId).storeProfile.keys().hasAny(['nickname'])
+        ? userData(userId).storeProfile.nickname
+        : '';
+    }
+
+    function userIndustry(userId) {
+      return userData(userId).keys().hasAny(['storeProfile'])
+        && userData(userId).storeProfile.keys().hasAny(['industry'])
+        ? userData(userId).storeProfile.industry
+        : null;
+    }
+
+    function userRegion(userId) {
+      return userData(userId).keys().hasAny(['storeProfile'])
+        && userData(userId).storeProfile.keys().hasAny(['region'])
+        ? userData(userId).storeProfile.region
+        : null;
+    }
+
+    function validAuthorSnapshotForCreate(userId) {
+      return isCurrentUser(userId)
+        && request.resource.data.authorLabel == userNickname(userId)
+        && request.resource.data.isOwnerVerified == isBusinessVerifiedUser(userId);
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function postRequiredKeys() {
+      return [
+        'id',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'title',
+        'body',
+        'boardType',
+        'createdAt',
+        'updatedAt',
+        'deletedAt',
+        'status',
+        'commentCount',
+        'likeCount',
+        'viewCount',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'imageUrls',
+        'likedUserIds'
+      ];
+    }
+
+    function postBaseKeys() {
+      return [
+        'id',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'title',
+        'body',
+        'boardType',
+        'usedType',
+        'isSold',
+        'industryId',
+        'locationLabel',
+        'createdAt',
+        'updatedAt',
+        'deletedAt',
+        'status',
+        'commentCount',
+        'likeCount',
+        'viewCount',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'imageUrls',
+        'imagePaths',
+        'likedUserIds'
+      ];
+    }
+
+    function commentRequiredKeys() {
+      return [
+        'id',
+        'postId',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'text',
+        'likeCount',
+        'likedUserIds',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'isDeleted',
+        'status',
+        'createdAt',
+        'updatedAt',
+        'deletedAt'
+      ];
+    }
+
+    function commentBaseKeys() {
+      return [
+        'id',
+        'postId',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'industryId',
+        'locationLabel',
+        'text',
+        'parentId',
+        'likeCount',
+        'likedUserIds',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'isDeleted',
+        'status',
+        'createdAt',
+        'updatedAt',
+        'deletedAt'
+      ];
+    }
+
+    function postImmutableFieldsUnchanged() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.authorLabel == resource.data.authorLabel
+        && request.resource.data.isOwnerVerified == resource.data.isOwnerVerified
+        && request.resource.data.boardType == resource.data.boardType
+        && request.resource.data.industryId == resource.data.industryId
+        && request.resource.data.locationLabel == resource.data.locationLabel
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function commentImmutableFieldsUnchanged() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.postId == resource.data.postId
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.authorLabel == resource.data.authorLabel
+        && request.resource.data.isOwnerVerified == resource.data.isOwnerVerified
+        && request.resource.data.industryId == resource.data.industryId
+        && request.resource.data.locationLabel == resource.data.locationLabel
+        && request.resource.data.parentId == resource.data.parentId
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function readablePost() {
+      return resource.data.status == 'active'
+        && resource.data.deletedAt == null
+        && resource.data.isHiddenByAdmin == false
+        && resource.data.isReportThresholdReached == false
+        && resource.data.adminRemovedAt == null;
+    }
+
+    function readableComment() {
+      return (
+          resource.data.status == 'active'
+          && resource.data.isDeleted == false
+          && resource.data.deletedAt == null
+          && resource.data.isHiddenByAdmin == false
+          && resource.data.isReportThresholdReached == false
+          && resource.data.adminRemovedAt == null
+        )
+        || resource.data.status == 'deletedByAuthor';
+    }
+
+    function isPostOwner() {
+      return signedIn()
+        && resource.data.authorId is string
+        && resource.data.authorId == currentUserId()
+        && isValidActiveUser(resource.data.authorId);
+    }
+
+    function isCommentOwner() {
+      return signedIn()
+        && resource.data.authorId is string
+        && resource.data.authorId == currentUserId()
+        && isValidActiveUser(resource.data.authorId);
+    }
+
+    function hasValidPostImageFields() {
+      return request.resource.data.imageUrls is list
+        && request.resource.data.imageUrls.size() <= 5
+        && (
+          !request.resource.data.keys().hasAny(['imagePaths'])
+          || (
+            request.resource.data.imagePaths is list
+            && request.resource.data.imagePaths.size() <= 5
+          )
+        );
+    }
+
+    function hasClearedPostImages() {
+      return request.resource.data.imageUrls is list
+        && request.resource.data.imageUrls.size() == 0
+        && (
+          !request.resource.data.keys().hasAny(['imagePaths'])
+          || (
+            request.resource.data.imagePaths is list
+            && request.resource.data.imagePaths.size() == 0
+          )
+        );
+    }
+
+    function validPostCreate() {
+      return request.resource.data.keys().hasOnly(postBaseKeys())
+        && request.resource.data.keys().hasAll(postRequiredKeys())
+        && request.resource.data.id is string
+        && request.resource.data.id.size() > 0
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.authorId is string
+        && validAuthorSnapshotForCreate(request.resource.data.authorId)
+        && request.resource.data.authorLabel is string
+        && request.resource.data.authorLabel.size() >= 2
+        && request.resource.data.authorLabel.size() <= 10
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 2
+        && request.resource.data.title.size() <= 60
+        && request.resource.data.body is string
+        && request.resource.data.body.size() >= 1
+        && request.resource.data.body.size() <= 1000
+        && request.resource.data.boardType in ['free', 'owner', 'used']
+        && (
+          !request.resource.data.keys().hasAny(['usedType'])
+          || request.resource.data.usedType == null
+          || request.resource.data.usedType is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['isSold'])
+          || request.resource.data.isSold is bool
+        )
+        && (
+          !request.resource.data.keys().hasAny(['industryId'])
+          || request.resource.data.industryId == null
+          || request.resource.data.industryId is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['locationLabel'])
+          || request.resource.data.locationLabel == null
+          || request.resource.data.locationLabel is string
+        )
+        && request.resource.data.status == 'active'
+        && request.resource.data.deletedAt == null
+        && request.resource.data.commentCount == 0
+        && request.resource.data.likeCount == 0
+        && request.resource.data.viewCount == 0
+        && request.resource.data.reportCount == 0
+        && request.resource.data.reportedUserIds is list
+        && request.resource.data.reportedUserIds.size() == 0
+        && request.resource.data.reportReasons is list
+        && request.resource.data.reportReasons.size() == 0
+        && request.resource.data.reportReasonCounts is map
+        && request.resource.data.reportReasonCounts.size() == 0
+        && request.resource.data.isReportThresholdReached == false
+        && request.resource.data.isHiddenByAdmin == false
+        && request.resource.data.adminHiddenReason == null
+        && request.resource.data.adminHiddenAt == null
+        && request.resource.data.adminRemovedAt == null
+        && request.resource.data.adminRemovedReason == null
+        && request.resource.data.likedUserIds is list
+        && request.resource.data.likedUserIds.size() == 0
+        && hasValidPostImageFields();
+    }
+
+    function validCommentCreate() {
+      return request.resource.data.keys().hasOnly(commentBaseKeys())
+        && request.resource.data.keys().hasAll(commentRequiredKeys())
+        && request.resource.data.id is string
+        && request.resource.data.id.size() > 0
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && exists(/databases/$(database)/documents/posts/$(request.resource.data.postId))
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.status == 'active'
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.deletedAt == null
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.isHiddenByAdmin == false
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.isReportThresholdReached == false
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.adminRemovedAt == null
+        && request.resource.data.authorId is string
+        && validAuthorSnapshotForCreate(request.resource.data.authorId)
+        && request.resource.data.authorLabel is string
+        && request.resource.data.authorLabel.size() >= 2
+        && request.resource.data.authorLabel.size() <= 10
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 1
+        && request.resource.data.text.size() <= 500
+        && (
+          !request.resource.data.keys().hasAny(['industryId'])
+          || request.resource.data.industryId == null
+          || request.resource.data.industryId is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['locationLabel'])
+          || request.resource.data.locationLabel == null
+          || request.resource.data.locationLabel is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['parentId'])
+          || request.resource.data.parentId == null
+          || request.resource.data.parentId is string
+        )
+        && request.resource.data.likeCount == 0
+        && request.resource.data.likedUserIds is list
+        && request.resource.data.likedUserIds.size() == 0
+        && request.resource.data.reportCount == 0
+        && request.resource.data.reportedUserIds is list
+        && request.resource.data.reportedUserIds.size() == 0
+        && request.resource.data.reportReasons is list
+        && request.resource.data.reportReasons.size() == 0
+        && request.resource.data.reportReasonCounts is map
+        && request.resource.data.reportReasonCounts.size() == 0
+        && request.resource.data.isReportThresholdReached == false
+        && request.resource.data.isHiddenByAdmin == false
+        && request.resource.data.adminHiddenReason == null
+        && request.resource.data.adminHiddenAt == null
+        && request.resource.data.adminRemovedAt == null
+        && request.resource.data.adminRemovedReason == null
+        && request.resource.data.isDeleted == false
+        && request.resource.data.status == 'active'
+        && request.resource.data.deletedAt == null;
+    }
+
+    function validPostOwnerUpdate() {
+      return isCurrentUser(resource.data.authorId)
+        && postImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'title',
+          'body',
+          'usedType',
+          'isSold',
+          'imageUrls',
+          'imagePaths',
+          'updatedAt'
+        ])
+        && resource.data.status == 'active'
+        && resource.data.deletedAt == null
+        && resource.data.isHiddenByAdmin == false
+        && resource.data.isReportThresholdReached == false
+        && resource.data.adminRemovedAt == null
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 2
+        && request.resource.data.title.size() <= 60
+        && request.resource.data.body is string
+        && request.resource.data.body.size() >= 1
+        && request.resource.data.body.size() <= 1000
+        && (
+          !request.resource.data.keys().hasAny(['usedType'])
+          || request.resource.data.usedType == null
+          || request.resource.data.usedType is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['isSold'])
+          || request.resource.data.isSold is bool
+        )
+        && hasValidPostImageFields();
+    }
+
+    function validPostOwnerSoftDelete() {
+      return false;
+    }
+
+    function validPostViewUpdate() {
+      return false;
+    }
+
+    function validPostLikeUpdate() {
+      return false;
+    }
+
+    function validPostCommentCountUpdate() {
+      return false;
+    }
+
+    function validPostAdminUpdate() {
+      return isAdmin()
+        && postImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'isHiddenByAdmin',
+          'status',
+          'adminHiddenReason',
+          'adminHiddenAt',
+          'adminRemovedAt',
+          'adminRemovedReason',
+          'isReportThresholdReached',
+          'updatedAt',
+          'isSold'
+        ])
+        && request.resource.data.status in [
+          'active',
+          'hiddenByReport',
+          'hiddenByAdmin',
+          'removedByAdmin'
+        ]
+        && (
+          request.resource.data.status != 'active'
+          || (
+            request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.adminHiddenReason == null
+            && request.resource.data.adminHiddenAt == null
+            && request.resource.data.adminRemovedAt == null
+            && request.resource.data.adminRemovedReason == null
+            && request.resource.data.isReportThresholdReached == false
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByAdmin'
+          || (
+            request.resource.data.isHiddenByAdmin == true
+            && request.resource.data.adminHiddenReason is string
+            && request.resource.data.adminHiddenReason.size() > 0
+            && request.resource.data.adminHiddenAt != null
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByReport'
+          || request.resource.data.isReportThresholdReached == true
+        )
+        && (
+          request.resource.data.status != 'removedByAdmin'
+          || (
+            request.resource.data.adminRemovedAt != null
+            && request.resource.data.adminRemovedReason is string
+            && request.resource.data.adminRemovedReason.size() > 0
+            && request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.isReportThresholdReached == false
+          )
+        );
+    }
+
+    function validCommentOwnerUpdate() {
+      return isCurrentUser(resource.data.authorId)
+        && commentImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'text',
+          'updatedAt'
+        ])
+        && resource.data.status == 'active'
+        && resource.data.isDeleted == false
+        && resource.data.deletedAt == null
+        && resource.data.isHiddenByAdmin == false
+        && resource.data.isReportThresholdReached == false
+        && resource.data.adminRemovedAt == null
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 1
+        && request.resource.data.text.size() <= 500;
+    }
+
+    function validCommentOwnerSoftDelete() {
+      return false;
+    }
+
+    function validCommentLikeUpdate() {
+      return false;
+    }
+
+    function validCommentAdminUpdate() {
+      return isAdmin()
+        && commentImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'isHiddenByAdmin',
+          'status',
+          'adminHiddenReason',
+          'adminHiddenAt',
+          'adminRemovedAt',
+          'adminRemovedReason',
+          'isReportThresholdReached',
+          'isDeleted',
+          'deletedAt',
+          'updatedAt'
+        ])
+        && request.resource.data.status in [
+          'active',
+          'deletedByAuthor',
+          'hiddenByReport',
+          'hiddenByAdmin',
+          'removedByAdmin'
+        ]
+        && (
+          request.resource.data.status != 'active'
+          || (
+            request.resource.data.isDeleted == false
+            && request.resource.data.deletedAt == null
+            && request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.adminHiddenReason == null
+            && request.resource.data.adminHiddenAt == null
+            && request.resource.data.adminRemovedAt == null
+            && request.resource.data.adminRemovedReason == null
+            && request.resource.data.isReportThresholdReached == false
+          )
+        )
+        && (
+          request.resource.data.status != 'deletedByAuthor'
+          || (
+            request.resource.data.isDeleted == true
+            && request.resource.data.deletedAt != null
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByAdmin'
+          || (
+            request.resource.data.isHiddenByAdmin == true
+            && request.resource.data.adminHiddenReason is string
+            && request.resource.data.adminHiddenReason.size() > 0
+            && request.resource.data.adminHiddenAt != null
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByReport'
+          || request.resource.data.isReportThresholdReached == true
+        )
+        && (
+          request.resource.data.status != 'removedByAdmin'
+          || (
+            request.resource.data.adminRemovedAt != null
+            && request.resource.data.adminRemovedReason is string
+            && request.resource.data.adminRemovedReason.size() > 0
+            && request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.isReportThresholdReached == false
+          )
+        );
+    }
+
+    function validPostLikeCreate() {
+      let uid = currentUserId();
+
+      return isCurrentUser(uid)
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'postId',
+          'userId',
+          'createdAt'
+        ])
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.userId == uid
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && exists(/databases/$(database)/documents/posts/$(request.resource.data.postId))
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.status == 'active';
+    }
+
+    function validCommentLikeCreate() {
+      let uid = currentUserId();
+
+      return isCurrentUser(uid)
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'postId',
+          'commentId',
+          'userId',
+          'createdAt'
+        ])
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.userId == uid
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && request.resource.data.commentId is string
+        && request.resource.data.commentId.size() > 0
+        && exists(/databases/$(database)/documents/comments/$(request.resource.data.commentId))
+        && get(/databases/$(database)/documents/comments/$(request.resource.data.commentId)).data.status == 'active';
+    }
+
+    function isSafePostListQuery() {
+      return request.query.limit != null
+        && request.query.limit <= 200;
+    }
+
+    function isSafeCommentListQuery() {
+      return request.query.limit != null
+        && request.query.limit <= 300;
+    }
+
+    match /auth_links/{firebaseUid} {
+      allow read, write: if false;
+    }
+
+    match /nicknames/{nicknameKey} {
+      allow read, write: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if signedIn()
+        && resource.data.firebaseUid == request.auth.uid;
+
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /notices/{noticeId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /admin_actions/{actionId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /audit_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /push_tokens/{tokenId} {
+      allow read, write: if false;
+    }
+
+    match /user_blocks/{blockId} {
+      allow read, write: if false;
+    }
+
+    match /user_private/{documentId} {
+      allow read, write: if false;
+    }
+
+    match /posts/{postId} {
+      allow get: if readablePost()
+        || isPostOwner()
+        || isAdmin();
+
+      allow list: if isAdmin()
+        || (
+          isSafePostListQuery()
+          && (
+            readablePost()
+            || isPostOwner()
+          )
+        );
+
+      allow create: if signedIn()
+        && validPostCreate();
+
+      allow update: if signedIn()
+        && request.resource.data.keys().hasOnly(postBaseKeys())
+        && (
+          validPostOwnerUpdate()
+          || validPostAdminUpdate()
+        );
+
+      allow delete: if false;
+    }
+
+    match /comments/{commentId} {
+      allow get: if readableComment()
+        || isCommentOwner()
+        || isAdmin();
+
+      allow list: if isAdmin()
+        || (
+          isSafeCommentListQuery()
+          && (
+            readableComment()
+            || isCommentOwner()
+          )
+        );
+
+      allow create: if false;
+
+      allow update: if signedIn()
+        && request.resource.data.keys().hasOnly(commentBaseKeys())
+        && (
+          validCommentOwnerUpdate()
+          || validCommentAdminUpdate()
+        );
+
+      allow delete: if false;
+    }
+
+    match /post_likes/{likeId} {
+      allow get, list: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /comment_likes/{likeId} {
+      allow get, list: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /harugyeolDays/{dateKey} {
+      allow get, list: if true;
+
+      allow create, update, delete: if false;
+
+      match /entries/{entryId} {
+        allow get: if signedIn()
+          && (
+            resource.data.userId == currentUserId()
+            || isAdmin()
+          );
+
+        allow list: if signedIn()
+          && request.query.limit != null
+          && request.query.limit <= 100
+          && (
+            resource.data.userId == currentUserId()
+            || isAdmin()
+          );
+
+        allow create, update, delete: if false;
+      }
+
+      match /comments/{commentId} {
+        allow get: if resource.data.status == 'active'
+          || isAdmin();
+
+        allow list: if request.query.limit != null
+          && request.query.limit <= 100
+          && (
+            resource.data.status == 'active'
+            || isAdmin()
+          );
+
+        allow create, update, delete: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

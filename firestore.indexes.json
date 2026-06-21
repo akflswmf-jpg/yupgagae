@@ -1,0 +1,516 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "likeCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "boardType", "order": "ASCENDING" },
+        { "fieldPath": "usedType", "order": "ASCENDING" },
+        { "fieldPath": "industryId", "order": "ASCENDING" },
+        { "fieldPath": "locationLabel", "order": "ASCENDING" },
+        { "fieldPath": "commentCount", "order": "DESCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "comments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "postId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "isDeleted", "order": "ASCENDING" },
+        { "fieldPath": "deletedAt", "order": "ASCENDING" },
+        { "fieldPath": "isHiddenByAdmin", "order": "ASCENDING" },
+        { "fieldPath": "isReportThresholdReached", "order": "ASCENDING" },
+        { "fieldPath": "adminRemovedAt", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" },
+        { "fieldPath": "__name__", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "comments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

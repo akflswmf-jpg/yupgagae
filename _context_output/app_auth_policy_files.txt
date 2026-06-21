@@ -1,0 +1,1856 @@
+﻿
+================================================
+FILE_PATH: lib/core/auth/auth_repository.dart
+================================================
+import 'package:yupgagae/core/auth/app_user.dart';
+
+abstract class AuthRepository {
+  Stream<AppUser?> watchCurrentUser();
+
+  Future<AppUser?> currentUser();
+
+  Future<AppUser> signInWithGoogle({
+    bool forceAccountSelection = false,
+  });
+
+  Future<AppUser> signInWithApple();
+
+  Future<AppUser> signInWithKakao();
+
+  Future<AppUser> completeProfileSetup({
+    required bool termsAgreed,
+    required String termsVersion,
+    required String nickname,
+    required String industry,
+    required String region,
+  });
+
+  Future<AppUser> updateMyStoreProfile({
+    required String nickname,
+    required String industry,
+    required String region,
+  });
+
+  Future<void> signOut();
+
+  Future<AppUser> mockVerifyIdentity({
+    required String name,
+  });
+
+  Future<AppUser> mockVerifyBusiness({
+    required String businessNumber,
+    required String representativeName,
+    required String openedAt,
+  });
+
+  Future<AppUser> mockUnverifyIdentity();
+
+  Future<AppUser> mockUnverifyBusiness();
+}
+
+// END_OF_FILE: lib/core/auth/auth_repository.dart
+
+================================================
+FILE_PATH: lib/core/auth/auth_controller.dart
+================================================
+import 'dart:async';
+
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/app_user.dart';
+import 'package:yupgagae/core/auth/auth_repository.dart';
+
+class AuthController extends GetxController {
+  final AuthRepository repository;
+
+  AuthController({
+    required this.repository,
+  });
+
+  final Rxn<AppUser> currentUser = Rxn<AppUser>();
+  final RxBool isInitialized = false.obs;
+  final RxBool isSigningIn = false.obs;
+  final RxBool isSigningOut = false.obs;
+  final RxBool isCompletingProfileSetup = false.obs;
+  final RxBool isUpdatingMyStoreProfile = false.obs;
+  final RxBool isRestoringCurrentUser = false.obs;
+  final RxBool isMockVerifyingIdentity = false.obs;
+  final RxBool isMockVerifyingBusiness = false.obs;
+  final RxBool isMockUnverifyingIdentity = false.obs;
+  final RxBool isMockUnverifyingBusiness = false.obs;
+  final RxnString errorMessage = RxnString();
+  final RxnString noticeMessage = RxnString();
+
+  StreamSubscription<AppUser?>? _userSubscription;
+
+  bool get isLoggedIn => currentUser.value != null;
+
+  bool get isOwnerVerified => currentUser.value?.isBusinessVerified ?? false;
+
+  bool get isIdentityVerified => currentUser.value?.isIdentityVerified ?? false;
+
+  bool get needsProfileSetup {
+    final user = currentUser.value;
+    if (user == null) return false;
+    return user.needsProfileSetup;
+  }
+
+  String? get userId => currentUser.value?.userId;
+
+  @override
+  void onInit() {
+    super.onInit();
+    _bindUserStream();
+  }
+
+  @override
+  void onClose() {
+    _userSubscription?.cancel();
+    super.onClose();
+  }
+
+  Future<AppUser?> restoreCurrentUserForStartup() async {
+    if (isRestoringCurrentUser.value) {
+      return currentUser.value;
+    }
+
+    isRestoringCurrentUser.value = true;
+    errorMessage.value = null;
+
+    try {
+      final user = await repository.currentUser();
+      currentUser.value = user;
+      isInitialized.value = true;
+      return user;
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      isInitialized.value = true;
+      rethrow;
+    } finally {
+      isRestoringCurrentUser.value = false;
+    }
+  }
+
+  Future<void> signInWithGoogle({
+    bool forceAccountSelection = false,
+  }) async {
+    if (isSigningIn.value) return;
+
+    isSigningIn.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.signInWithGoogle(
+        forceAccountSelection: forceAccountSelection,
+      );
+      currentUser.value = user;
+      noticeMessage.value = 'Google 로그인이 완료되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+    } finally {
+      isSigningIn.value = false;
+    }
+  }
+
+  Future<void> signInWithApple() async {
+    if (isSigningIn.value) return;
+
+    isSigningIn.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.signInWithApple();
+      currentUser.value = user;
+      noticeMessage.value = 'Apple 로그인이 완료되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+    } finally {
+      isSigningIn.value = false;
+    }
+  }
+
+  Future<void> signInWithKakao() async {
+    if (isSigningIn.value) return;
+
+    isSigningIn.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.signInWithKakao();
+      currentUser.value = user;
+      noticeMessage.value = '카카오 로그인이 완료되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+    } finally {
+      isSigningIn.value = false;
+    }
+  }
+
+  Future<void> completeProfileSetup({
+    required bool termsAgreed,
+    required String termsVersion,
+    required String nickname,
+    required String industry,
+    required String region,
+  }) async {
+    if (isCompletingProfileSetup.value) return;
+
+    isCompletingProfileSetup.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.completeProfileSetup(
+        termsAgreed: termsAgreed,
+        termsVersion: termsVersion,
+        nickname: nickname,
+        industry: industry,
+        region: region,
+      );
+
+      currentUser.value = user;
+      noticeMessage.value = '가입 설정이 완료되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isCompletingProfileSetup.value = false;
+    }
+  }
+
+  Future<void> updateMyStoreProfile({
+    required String nickname,
+    required String industry,
+    required String region,
+  }) async {
+    if (isUpdatingMyStoreProfile.value) return;
+
+    isUpdatingMyStoreProfile.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.updateMyStoreProfile(
+        nickname: nickname,
+        industry: industry,
+        region: region,
+      );
+
+      currentUser.value = user;
+      noticeMessage.value = '내가게 정보가 수정되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isUpdatingMyStoreProfile.value = false;
+    }
+  }
+
+  Future<void> signOut() async {
+    if (isSigningOut.value) return;
+
+    isSigningOut.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      await repository.signOut();
+      currentUser.value = null;
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+    } finally {
+      isSigningOut.value = false;
+    }
+  }
+
+  Future<void> mockVerifyIdentity({
+    required String name,
+  }) async {
+    if (isMockVerifyingIdentity.value) return;
+
+    isMockVerifyingIdentity.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.mockVerifyIdentity(
+        name: name,
+      );
+
+      currentUser.value = user;
+      noticeMessage.value = '본인 인증 상태가 갱신되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isMockVerifyingIdentity.value = false;
+    }
+  }
+
+  Future<void> mockVerifyBusiness({
+    required String businessNumber,
+    required String representativeName,
+    required String openedAt,
+  }) async {
+    if (isMockVerifyingBusiness.value) return;
+
+    isMockVerifyingBusiness.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.mockVerifyBusiness(
+        businessNumber: businessNumber,
+        representativeName: representativeName,
+        openedAt: openedAt,
+      );
+
+      currentUser.value = user;
+      noticeMessage.value = '사업자 인증 상태가 갱신되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isMockVerifyingBusiness.value = false;
+    }
+  }
+
+  Future<void> mockUnverifyIdentity() async {
+    if (isMockUnverifyingIdentity.value) return;
+
+    isMockUnverifyingIdentity.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.mockUnverifyIdentity();
+      currentUser.value = user;
+      noticeMessage.value = '본인 인증이 해제되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isMockUnverifyingIdentity.value = false;
+    }
+  }
+
+  Future<void> mockUnverifyBusiness() async {
+    if (isMockUnverifyingBusiness.value) return;
+
+    isMockUnverifyingBusiness.value = true;
+    errorMessage.value = null;
+    noticeMessage.value = null;
+
+    try {
+      final user = await repository.mockUnverifyBusiness();
+      currentUser.value = user;
+      noticeMessage.value = '사업자 인증이 해제되었습니다.';
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isMockUnverifyingBusiness.value = false;
+    }
+  }
+
+  void clearError() {
+    errorMessage.value = null;
+  }
+
+  void clearNotice() {
+    noticeMessage.value = null;
+  }
+
+  void _bindUserStream() {
+    _userSubscription?.cancel();
+
+    _userSubscription = repository.watchCurrentUser().listen(
+      (user) {
+        currentUser.value = user;
+        isInitialized.value = true;
+      },
+      onError: (Object error) {
+        errorMessage.value = _friendlyError(error);
+        isInitialized.value = true;
+      },
+    );
+  }
+
+  String _friendlyError(Object error) {
+    final raw = error.toString().toLowerCase();
+
+    if (raw.contains('permission-denied')) {
+      return '권한이 없습니다. Firestore 규칙을 확인해주세요.';
+    }
+
+    if (raw.contains('unauthenticated')) {
+      return '로그인 인증이 만료되었습니다. 다시 로그인해주세요.';
+    }
+
+    if (raw.contains('unavailable')) {
+      return '서버 연결이 불안정합니다. 잠시 후 다시 시도해주세요.';
+    }
+
+    if (raw.contains('deadline-exceeded') || raw.contains('timeout')) {
+      return '요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.';
+    }
+
+    if (raw.contains('network')) {
+      return '네트워크 상태를 확인해주세요.';
+    }
+
+    if (raw.contains('canceled') || raw.contains('cancelled')) {
+      return '로그인이 취소되었습니다.';
+    }
+
+    if (raw.contains('authorizationerrorcode.canceled')) {
+      return 'Apple 로그인이 취소되었습니다.';
+    }
+
+    if (raw.contains('kakao') && raw.contains('cancel')) {
+      return '카카오 로그인이 취소되었습니다.';
+    }
+
+    if (raw.contains('popup_closed')) {
+      return '로그인 창이 닫혔습니다.';
+    }
+
+    if (raw.contains('idtoken')) {
+      return '로그인 토큰을 확인하지 못했습니다.';
+    }
+
+    if (raw.contains('apple login is only available')) {
+      return 'Apple 로그인은 iOS 기기에서 테스트해주세요.';
+    }
+
+    if (raw.contains('kakao access token is empty')) {
+      return '카카오 로그인 토큰을 확인하지 못했습니다.';
+    }
+
+    if (raw.contains('kakao custom token is empty')) {
+      return '카카오 Firebase 로그인 토큰을 확인하지 못했습니다.';
+    }
+
+    if (raw.contains('failed to resolve internal userid')) {
+      return '내부 사용자 정보를 확인하지 못했습니다.';
+    }
+
+    if (raw.contains('user document does not exist')) {
+      return '사용자 문서를 찾을 수 없습니다.';
+    }
+
+    if (raw.contains('auth link document does not exist')) {
+      return '로그인 연결 정보를 찾을 수 없습니다. 다시 로그인해주세요.';
+    }
+
+    if (raw.contains('terms agreement is required')) {
+      return '약관 동의가 필요합니다.';
+    }
+
+    if (raw.contains('nickname is required')) {
+      return '닉네임을 입력해주세요.';
+    }
+
+    if (raw.contains('nickname must be at least')) {
+      return '닉네임은 2자 이상이어야 합니다.';
+    }
+
+    if (raw.contains('nickname must be 12')) {
+      return '닉네임은 12자 이하로 입력해주세요.';
+    }
+
+    if (raw.contains('industry is required')) {
+      return '업종을 선택해주세요.';
+    }
+
+    if (raw.contains('region is required')) {
+      return '지역을 선택해주세요.';
+    }
+
+    if (raw.contains('profile setup must be completed first')) {
+      return '가입 설정을 먼저 완료해주세요.';
+    }
+
+    if (raw.contains('identity verification must be completed first')) {
+      return '본인 인증을 먼저 완료해주세요.';
+    }
+
+    if (raw.contains('identity verified name is required')) {
+      return '본인 인증 이름을 먼저 확인해주세요.';
+    }
+
+    if (raw.contains('identity name and business representative name do not match')) {
+      return '본인 인증 이름과 사업자 대표자명이 일치하지 않습니다.\n공동대표, 가족 운영, 동업자 등 추가 인증이 필요한 경우 의견함으로 문의해주세요.';
+    }
+
+    if (raw.contains('business number must be 10')) {
+      return '사업자등록번호 10자리를 입력해주세요.';
+    }
+
+    if (raw.contains('business number format is invalid')) {
+      return '사업자등록번호 형식을 확인해주세요.';
+    }
+
+    if (raw.contains('representative name is required')) {
+      return '대표자명을 입력해주세요.';
+    }
+
+    if (raw.contains('opened date must be yyyymmdd')) {
+      return '사업자등록증상 개업일을 올바르게 입력해주세요.';
+    }
+
+    if (raw.contains('business verification failed') ||
+        raw.contains('not_matched') ||
+        raw.contains('cannot be confirmed') ||
+        raw.contains('확인할 수 없습니다') ||
+        raw.contains('일치하지 않습니다')) {
+      return '사업자등록번호, 대표자명, 사업자등록증상 개업일이 국세청 정보와 일치하지 않습니다.\n사업자등록증에 표시된 정보를 다시 확인해주세요.';
+    }
+
+    if (raw.contains('failed-precondition')) {
+      return '입력한 인증 정보를 다시 확인해주세요.';
+    }
+
+    if (raw.contains('nts service key is not configured')) {
+      return '사업자 인증 서버 설정이 완료되지 않았습니다.';
+    }
+
+    if (raw.contains('사업자 인증 서버가 일시적으로 불안정')) {
+      return '사업자 인증 서버가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.';
+    }
+
+    if (raw.contains('로그인이 필요합니다')) {
+      return '로그인이 필요합니다.';
+    }
+
+    return '처리 중 문제가 발생했습니다.';
+  }
+}
+
+// END_OF_FILE: lib/core/auth/auth_controller.dart
+
+================================================
+FILE_PATH: lib/core/auth/firebase_auth_repository.dart
+================================================
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:crypto/crypto.dart';
+import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:kakao_flutter_sdk_user/kakao_flutter_sdk_user.dart' as kakao;
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+
+import 'package:yupgagae/core/auth/app_user.dart';
+import 'package:yupgagae/core/auth/auth_repository.dart';
+
+class FirebaseAuthRepository implements AuthRepository {
+  final firebase_auth.FirebaseAuth _auth;
+  final FirebaseFirestore _firestore;
+  final FirebaseFunctions _functions;
+  final GoogleSignIn _googleSignIn;
+
+  bool _googleInitialized = false;
+  Future<void>? _googleInitializeFuture;
+
+  String? _cachedInternalUserId;
+
+  FirebaseAuthRepository({
+    firebase_auth.FirebaseAuth? auth,
+    FirebaseFirestore? firestore,
+    FirebaseFunctions? functions,
+    GoogleSignIn? googleSignIn,
+  })  : _auth = auth ?? firebase_auth.FirebaseAuth.instance,
+        _firestore = firestore ?? FirebaseFirestore.instance,
+        _functions = functions ??
+            FirebaseFunctions.instanceFor(region: 'asia-northeast3'),
+        _googleSignIn = googleSignIn ?? GoogleSignIn.instance;
+
+  @override
+  Stream<AppUser?> watchCurrentUser() {
+    return _auth.authStateChanges().asyncExpand((firebaseUser) async* {
+      if (firebaseUser == null) {
+        _cachedInternalUserId = null;
+        yield null;
+        return;
+      }
+
+      final internalUserId = _cachedInternalUserId;
+
+      if (internalUserId == null || internalUserId.trim().isEmpty) {
+        yield null;
+        return;
+      }
+
+      yield* _watchUserById(internalUserId);
+    });
+  }
+
+  @override
+  Future<AppUser?> currentUser() async {
+    final firebaseUser = _auth.currentUser;
+    if (firebaseUser == null) return null;
+
+    final internalUserId = _cachedInternalUserId;
+
+    if (internalUserId != null && internalUserId.trim().isNotEmpty) {
+      return _readUserById(internalUserId);
+    }
+
+    final serverUser = await _ensureAuthUserProfileOnServer(
+      providerOverride: _resolvePrimaryProvider(firebaseUser),
+      emailOverride: firebaseUser.email,
+      displayNameOverride: firebaseUser.displayName,
+      photoUrlOverride: firebaseUser.photoURL,
+    );
+
+    _cachedInternalUserId = serverUser.userId;
+
+    return _readUserById(serverUser.userId);
+  }
+
+  @override
+  Future<AppUser> signInWithGoogle({
+    bool forceAccountSelection = false,
+  }) async {
+    await _initializeGoogleSignIn();
+
+    if (forceAccountSelection) {
+      await _safeGoogleSignOut();
+    }
+
+    final GoogleSignInAccount googleUser = await _googleSignIn.authenticate();
+    final GoogleSignInAuthentication googleAuth = googleUser.authentication;
+    final String? idToken = googleAuth.idToken;
+
+    if (idToken == null || idToken.trim().isEmpty) {
+      throw Exception('Google idToken is empty');
+    }
+
+    final credential = firebase_auth.GoogleAuthProvider.credential(
+      idToken: idToken,
+    );
+
+    final userCredential = await _auth.signInWithCredential(credential);
+    final firebaseUser = userCredential.user;
+
+    if (firebaseUser == null) {
+      throw Exception('Firebase user is null after Google sign-in');
+    }
+
+    final serverUser = await _ensureAuthUserProfileOnServer(
+      providerOverride: 'google',
+      emailOverride: firebaseUser.email,
+      displayNameOverride: firebaseUser.displayName,
+      photoUrlOverride: firebaseUser.photoURL,
+    );
+
+    _cachedInternalUserId = serverUser.userId;
+
+    return _readUserById(serverUser.userId);
+  }
+
+  @override
+  Future<AppUser> signInWithApple() async {
+    final isAvailable = await SignInWithApple.isAvailable();
+
+    if (!isAvailable) {
+      throw Exception(
+        'Apple login is only available on supported Apple devices.',
+      );
+    }
+
+    final rawNonce = _generateNonce();
+    final hashedNonce = _sha256OfString(rawNonce);
+
+    final appleCredential = await SignInWithApple.getAppleIDCredential(
+      scopes: const [
+        AppleIDAuthorizationScopes.email,
+        AppleIDAuthorizationScopes.fullName,
+      ],
+      nonce: hashedNonce,
+    );
+
+    final idToken = appleCredential.identityToken;
+
+    if (idToken == null || idToken.trim().isEmpty) {
+      throw Exception('Apple idToken is empty');
+    }
+
+    final oauthCredential =
+        firebase_auth.OAuthProvider('apple.com').credential(
+      idToken: idToken,
+      rawNonce: rawNonce,
+    );
+
+    final userCredential = await _auth.signInWithCredential(oauthCredential);
+    final firebaseUser = userCredential.user;
+
+    if (firebaseUser == null) {
+      throw Exception('Firebase user is null after Apple sign-in');
+    }
+
+    final appleDisplayName = _joinAppleName(
+      givenName: appleCredential.givenName,
+      familyName: appleCredential.familyName,
+    );
+
+    if (appleDisplayName != null &&
+        appleDisplayName.isNotEmpty &&
+        (firebaseUser.displayName == null ||
+            firebaseUser.displayName!.trim().isEmpty)) {
+      try {
+        await firebaseUser.updateDisplayName(appleDisplayName);
+      } catch (_) {}
+    }
+
+    final serverUser = await _ensureAuthUserProfileOnServer(
+      providerOverride: 'apple',
+      emailOverride: appleCredential.email ?? firebaseUser.email,
+      displayNameOverride: appleDisplayName ?? firebaseUser.displayName,
+      photoUrlOverride: firebaseUser.photoURL,
+    );
+
+    _cachedInternalUserId = serverUser.userId;
+
+    return _readUserById(serverUser.userId);
+  }
+
+  @override
+  Future<AppUser> signInWithKakao() async {
+    final accessToken = await _signInWithKakaoAndGetAccessToken();
+
+    final callable = _functions.httpsCallable(
+      'signInWithKakao',
+      options: HttpsCallableOptions(
+        timeout: const Duration(seconds: 20),
+      ),
+    );
+
+    final result = await callable.call<Map<String, dynamic>>(
+      <String, dynamic>{
+        'accessToken': accessToken,
+      },
+    );
+
+    final data = Map<String, dynamic>.from(result.data);
+
+    final customToken = _asNullableString(data['customToken']);
+    if (customToken == null || customToken.trim().isEmpty) {
+      throw Exception('Kakao custom token is empty');
+    }
+
+    final internalUserId = _asString(data['userId']);
+    if (internalUserId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    _cachedInternalUserId = internalUserId;
+
+    final userCredential = await _auth.signInWithCustomToken(customToken);
+    final firebaseUser = userCredential.user;
+
+    if (firebaseUser == null) {
+      _cachedInternalUserId = null;
+      throw Exception('Firebase user is null after Kakao custom token sign-in');
+    }
+
+    return _readUserById(internalUserId);
+  }
+
+  @override
+  Future<AppUser> completeProfileSetup({
+    required bool termsAgreed,
+    required String termsVersion,
+    required String nickname,
+    required String industry,
+    required String region,
+  }) async {
+    final firebaseUser = _auth.currentUser;
+
+    if (firebaseUser == null) {
+      throw Exception('로그인이 필요합니다');
+    }
+
+    final callable = _functions.httpsCallable(
+      'completeUserProfileSetup',
+      options: HttpsCallableOptions(
+        timeout: const Duration(seconds: 20),
+      ),
+    );
+
+    final result = await callable.call<Map<String, dynamic>>(
+      <String, dynamic>{
+        'termsAgreed': termsAgreed,
+        'termsVersion': termsVersion,
+        'nickname': nickname,
+        'industry': industry,
+        'region': region,
+      },
+    );
+
+    final data = Map<String, dynamic>.from(result.data);
+    final userId = _asString(data['userId']);
+
+    if (userId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    _cachedInternalUserId = userId;
+
+    return _readUserById(userId);
+  }
+
+  @override
+  Future<AppUser> updateMyStoreProfile({
+    required String nickname,
+    required String industry,
+    required String region,
+  }) async {
+    final firebaseUser = _auth.currentUser;
+
+    if (firebaseUser == null) {
+      throw Exception('로그인이 필요합니다');
+    }
+
+    final callable = _functions.httpsCallable(
+      'updateMyStoreProfile',
+      options: HttpsCallableOptions(
+        timeout: const Duration(seconds: 20),
+      ),
+    );
+
+    final result = await callable.call<Map<String, dynamic>>(
+      <String, dynamic>{
+        'nickname': nickname,
+        'industry': industry,
+        'region': region,
+      },
+    );
+
+    final data = Map<String, dynamic>.from(result.data);
+    final userId = _asString(data['userId']);
+
+    if (userId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    _cachedInternalUserId = userId;
+
+    return _readUserById(userId);
+  }
+
+  @override
+  Future<AppUser> mockVerifyIdentity({
+    required String name,
+  }) async {
+    return _callAuthUserMutation(
+      'mockVerifyIdentityOnServer',
+      data: <String, dynamic>{
+        'name': name,
+      },
+    );
+  }
+
+  @override
+  Future<AppUser> mockVerifyBusiness({
+    required String businessNumber,
+    required String representativeName,
+    required String openedAt,
+  }) async {
+    return _callAuthUserMutation(
+      'mockVerifyBusinessOnServer',
+      data: <String, dynamic>{
+        'businessNumber': businessNumber,
+        'representativeName': representativeName,
+        'openedAt': openedAt,
+      },
+    );
+  }
+
+  @override
+  Future<AppUser> mockUnverifyIdentity() async {
+    return _callAuthUserMutation('mockUnverifyIdentityOnServer');
+  }
+
+  @override
+  Future<AppUser> mockUnverifyBusiness() async {
+    return _callAuthUserMutation('mockUnverifyBusinessOnServer');
+  }
+
+  @override
+  Future<void> signOut() async {
+    _cachedInternalUserId = null;
+
+    await Future.wait<void>([
+      _auth.signOut(),
+      _safeGoogleSignOut(),
+      _safeKakaoLogout(),
+    ]);
+  }
+
+  Future<AppUser> _callAuthUserMutation(
+    String functionName, {
+    Map<String, dynamic> data = const <String, dynamic>{},
+  }) async {
+    final firebaseUser = _auth.currentUser;
+
+    if (firebaseUser == null) {
+      throw Exception('로그인이 필요합니다');
+    }
+
+    final callable = _functions.httpsCallable(
+      functionName,
+      options: HttpsCallableOptions(
+        timeout: const Duration(seconds: 25),
+      ),
+    );
+
+    final result = await callable.call<Map<String, dynamic>>(data);
+
+    final responseData = Map<String, dynamic>.from(result.data);
+    final userId = _asString(responseData['userId']);
+
+    if (userId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    _cachedInternalUserId = userId;
+
+    return _readUserById(userId);
+  }
+
+  Stream<AppUser> _watchUserById(String userId) {
+    final normalizedUserId = userId.trim();
+
+    if (normalizedUserId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    return _firestore
+        .collection('users')
+        .doc(normalizedUserId)
+        .snapshots()
+        .map((snapshot) {
+      final data = snapshot.data();
+
+      if (data == null) {
+        throw Exception('User document does not exist');
+      }
+
+      return _mapUserDocument(data);
+    });
+  }
+
+  Future<AppUser> _ensureAuthUserProfileOnServer({
+    required String providerOverride,
+    String? emailOverride,
+    String? displayNameOverride,
+    String? photoUrlOverride,
+  }) async {
+    final callable = _functions.httpsCallable(
+      'ensureAuthUserProfile',
+      options: HttpsCallableOptions(
+        timeout: const Duration(seconds: 20),
+      ),
+    );
+
+    final result = await callable.call<Map<String, dynamic>>(
+      <String, dynamic>{
+        'provider': providerOverride,
+        'email': emailOverride,
+        'displayName': displayNameOverride,
+        'photoUrl': photoUrlOverride,
+      },
+    );
+
+    final data = Map<String, dynamic>.from(result.data);
+    final userId = _asString(data['userId']);
+
+    if (userId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    return AppUser(
+      userId: userId,
+      firebaseUid: _asString(data['firebaseUid']),
+      provider: _asString(data['provider'], fallback: providerOverride),
+      email: _asNullableString(data['email']),
+      displayName: _asNullableString(data['displayName']),
+      photoUrl: _asNullableString(data['photoUrl']),
+      role: _asString(data['role'], fallback: 'user'),
+      identityStatus: _asString(data['identityStatus'], fallback: 'none'),
+      businessStatus: _asString(data['businessStatus'], fallback: 'none'),
+      profileSetupCompleted: _asBool(data['profileSetupCompleted']),
+      termsAgreed: _asBool(data['termsAgreed']),
+      nickname: _asNullableString(data['nickname']),
+      industry: _asNullableString(data['industry']),
+      region: _asNullableString(data['region']),
+      createdAt: null,
+      updatedAt: null,
+      lastLoginAt: null,
+    );
+  }
+
+  Future<AppUser> _readUserById(String userId) async {
+    final normalizedUserId = userId.trim();
+
+    if (normalizedUserId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    final snapshot =
+        await _firestore.collection('users').doc(normalizedUserId).get();
+    final data = snapshot.data();
+
+    if (data == null) {
+      throw Exception('User document does not exist');
+    }
+
+    return _mapUserDocument(data);
+  }
+
+  Future<String> _signInWithKakaoAndGetAccessToken() async {
+    kakao.OAuthToken token;
+
+    final installed = await kakao.isKakaoTalkInstalled();
+
+    if (installed) {
+      try {
+        token = await kakao.UserApi.instance.loginWithKakaoTalk();
+      } catch (_) {
+        token = await kakao.UserApi.instance.loginWithKakaoAccount();
+      }
+    } else {
+      token = await kakao.UserApi.instance.loginWithKakaoAccount();
+    }
+
+    final accessToken = token.accessToken.trim();
+
+    if (accessToken.isEmpty) {
+      throw Exception('Kakao access token is empty');
+    }
+
+    return accessToken;
+  }
+
+  Future<void> _initializeGoogleSignIn() {
+    if (_googleInitialized) return Future<void>.value();
+
+    final running = _googleInitializeFuture;
+    if (running != null) return running;
+
+    _googleInitializeFuture = _googleSignIn.initialize().then((_) {
+      _googleInitialized = true;
+    });
+
+    return _googleInitializeFuture!;
+  }
+
+  Future<void> _safeGoogleSignOut() async {
+    try {
+      await _googleSignIn.signOut();
+    } catch (_) {}
+  }
+
+  Future<void> _safeKakaoLogout() async {
+    try {
+      await kakao.UserApi.instance.logout();
+    } catch (_) {}
+  }
+
+  AppUser _mapUserDocument(Map<String, dynamic> data) {
+    final identity = _asMap(data['identity']);
+    final business = _asMap(data['business']);
+    final terms = _asMap(data['terms']);
+    final storeProfile = _asMap(data['storeProfile']);
+
+    return AppUser(
+      userId: _asString(data['userId']),
+      firebaseUid: _asString(data['firebaseUid']),
+      provider: _asString(data['provider']),
+      email: _asNullableString(data['email']),
+      displayName: _asNullableString(data['displayName']),
+      photoUrl: _asNullableString(data['photoUrl']),
+      role: _asString(data['role'], fallback: 'user'),
+      identityStatus: _asString(identity['status'], fallback: 'none'),
+      businessStatus: _asString(business['status'], fallback: 'none'),
+      profileSetupCompleted: _asBool(data['profileSetupCompleted']),
+      termsAgreed: _asBool(terms['agreed']),
+      nickname: _asNullableString(storeProfile['nickname']),
+      industry: _asNullableString(storeProfile['industry']),
+      region: _asNullableString(storeProfile['region']),
+      createdAt: _asDateTime(data['createdAt']),
+      updatedAt: _asDateTime(data['updatedAt']),
+      lastLoginAt: _asDateTime(data['lastLoginAt']),
+    );
+  }
+
+  Map<String, dynamic> _asMap(Object? value) {
+    if (value is Map<String, dynamic>) return value;
+    if (value is Map) {
+      return value.map((k, v) => MapEntry(k.toString(), v));
+    }
+    return <String, dynamic>{};
+  }
+
+  String _asString(Object? value, {String fallback = ''}) {
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    return fallback;
+  }
+
+  String? _asNullableString(Object? value) {
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    return null;
+  }
+
+  bool _asBool(Object? value, {bool fallback = false}) {
+    if (value is bool) return value;
+    return fallback;
+  }
+
+  DateTime? _asDateTime(Object? value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    return null;
+  }
+
+  String _resolvePrimaryProvider(firebase_auth.User firebaseUser) {
+    final providerData = firebaseUser.providerData;
+    if (providerData.isEmpty) return 'firebase';
+
+    final providerId = providerData.first.providerId;
+
+    if (providerId == 'google.com') return 'google';
+    if (providerId == 'apple.com') return 'apple';
+    if (providerId == 'password') return 'password';
+    if (providerId == 'firebase') return 'firebase';
+
+    return providerId;
+  }
+
+  String _generateNonce([int length = 32]) {
+    const charset =
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+    final random = Random.secure();
+    return List<String>.generate(
+      length,
+      (_) => charset[random.nextInt(charset.length)],
+    ).join();
+  }
+
+  String _sha256OfString(String input) {
+    final bytes = utf8.encode(input);
+    final digest = sha256.convert(bytes);
+    return digest.toString();
+  }
+
+  String? _joinAppleName({
+    required String? givenName,
+    required String? familyName,
+  }) {
+    final parts = <String>[
+      if (givenName != null && givenName.trim().isNotEmpty) givenName.trim(),
+      if (familyName != null && familyName.trim().isNotEmpty)
+        familyName.trim(),
+    ];
+    if (parts.isEmpty) return null;
+    return parts.join(' ');
+  }
+}
+
+// END_OF_FILE: lib/core/auth/firebase_auth_repository.dart
+
+================================================
+FILE_PATH: lib/features/auth/view/profile_setup_screen.dart
+================================================
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/auth_controller.dart';
+import 'package:yupgagae/core/policy/app_policy_documents.dart';
+import 'package:yupgagae/features/community/domain/industry_catalog.dart';
+import 'package:yupgagae/features/my_store/domain/store_profile.dart';
+import 'package:yupgagae/routes/app_routes.dart';
+
+class ProfileSetupScreen extends StatefulWidget {
+  const ProfileSetupScreen({super.key});
+
+  @override
+  State<ProfileSetupScreen> createState() => _ProfileSetupScreenState();
+}
+
+class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
+  static const Color _kPrimary = Color(0xFFA56E5F);
+  static const Color _kPrimarySoft = Color(0xFFF6EEEA);
+  static const Color _kTextStrong = Color(0xFF25211F);
+  static const Color _kTextNormal = Color(0xFF4B5563);
+  static const Color _kTextSoft = Color(0xFF8A817C);
+  static const Color _kBorder = Color(0xFFEDE7E3);
+  static const Color _kInputFill = Color(0xFFFFFFFF);
+
+  late final AuthController controller;
+  late final TextEditingController nicknameController;
+
+  final Set<AppPolicyDocumentType> agreedRequiredPolicyTypes =
+      <AppPolicyDocumentType>{};
+
+  bool pushAgreed = false;
+  String? selectedIndustry;
+  String? selectedRegion;
+
+  bool get allRequiredPoliciesAgreed {
+    return AppPolicyDocuments.requiredDocuments.every(
+      (document) => agreedRequiredPolicyTypes.contains(document.type),
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    controller = Get.find<AuthController>();
+
+    final user = controller.currentUser.value;
+
+    nicknameController = TextEditingController(
+      text: user?.nickname ?? '',
+    );
+
+    selectedIndustry = user?.industry;
+    selectedRegion = user?.region;
+  }
+
+  @override
+  void dispose() {
+    nicknameController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final nickname = nicknameController.text.trim();
+    final industry = selectedIndustry?.trim() ?? '';
+    final region = selectedRegion?.trim() ?? '';
+
+    FocusScope.of(context).unfocus();
+
+    if (!allRequiredPoliciesAgreed) {
+      _showSnack('필수 약관에 모두 동의해주세요.');
+      return;
+    }
+
+    if (nickname.isEmpty) {
+      _showSnack('닉네임을 입력해주세요.');
+      return;
+    }
+
+    if (nickname.length < 2) {
+      _showSnack('닉네임은 2자 이상이어야 합니다.');
+      return;
+    }
+
+    if (nickname.length > 12) {
+      _showSnack('닉네임은 12자 이하로 입력해주세요.');
+      return;
+    }
+
+    if (industry.isEmpty) {
+      _showSnack('업종을 선택해주세요.');
+      return;
+    }
+
+    if (region.isEmpty) {
+      _showSnack('지역을 선택해주세요.');
+      return;
+    }
+
+    try {
+      await controller.completeProfileSetup(
+        termsAgreed: allRequiredPoliciesAgreed,
+        termsVersion: AppPolicyDocuments.bundleVersion,
+        nickname: nickname,
+        industry: industry,
+        region: region,
+      );
+
+      if (!mounted) return;
+
+      Get.offAllNamed(AppRoutes.root);
+    } catch (_) {
+      final message = controller.errorMessage.value;
+      if (message != null && message.trim().isNotEmpty) {
+        _showSnack(message);
+      }
+    }
+  }
+
+  void _showSnack(String message) {
+    Get.snackbar(
+      '안내',
+      message,
+      snackPosition: SnackPosition.BOTTOM,
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 18),
+      borderRadius: 14,
+      backgroundColor: Colors.black.withValues(alpha: 0.82),
+      colorText: Colors.white,
+      duration: const Duration(seconds: 2),
+    );
+  }
+
+  List<String> _industryOptions() {
+    return IndustryCatalog.ordered()
+        .map((e) => e.name)
+        .where((e) => e.trim().isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+  }
+
+  List<String> _regionOptions() {
+    return StoreProfile.regionOptions
+        .where((e) => e.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  void _toggleRequiredPolicy(AppPolicyDocument document) {
+    setState(() {
+      if (agreedRequiredPolicyTypes.contains(document.type)) {
+        agreedRequiredPolicyTypes.remove(document.type);
+      } else {
+        agreedRequiredPolicyTypes.add(document.type);
+      }
+    });
+  }
+
+  void _setAllRequiredPolicies(bool checked) {
+    setState(() {
+      if (checked) {
+        agreedRequiredPolicyTypes
+          ..clear()
+          ..addAll(
+            AppPolicyDocuments.requiredDocuments.map((e) => e.type),
+          );
+      } else {
+        agreedRequiredPolicyTypes.clear();
+      }
+    });
+  }
+
+  void _openPolicyDocument(AppPolicyDocument document) {
+    Get.toNamed(
+      AppRoutes.policyDocument,
+      arguments: document,
+    );
+  }
+
+  Widget _buildHeader() {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '기본 정보를 설정해주세요',
+          style: TextStyle(
+            fontSize: 27,
+            fontWeight: FontWeight.w900,
+            letterSpacing: -0.8,
+            color: _kTextStrong,
+            height: 1.15,
+          ),
+        ),
+        SizedBox(height: 10),
+        Text(
+          '옆가게에서 사용할 닉네임, 업종, 지역을 설정합니다. 입력한 정보는 게시글 작성자 표시와 커뮤니티 이용 기준에 사용됩니다.',
+          style: TextStyle(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w600,
+            color: _kTextNormal,
+            height: 1.45,
+            letterSpacing: -0.2,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNoticeBox() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 13, 14, 13),
+      decoration: BoxDecoration(
+        color: _kPrimarySoft,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE8D8D0)),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.verified_user_outlined,
+            size: 18,
+            color: _kPrimary,
+          ),
+          SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              '본인인증과 사업자 인증은 이후 단계에서 연결됩니다. 지금은 가입에 필요한 기본 정보와 필수 정책 동의를 설정합니다.',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF6B4D44),
+                height: 1.4,
+                letterSpacing: -0.15,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNicknameField() {
+    return TextField(
+      controller: nicknameController,
+      maxLength: 12,
+      textInputAction: TextInputAction.done,
+      decoration: InputDecoration(
+        counterText: '',
+        filled: true,
+        fillColor: _kInputFill,
+        labelText: '닉네임',
+        hintText: '예: 둘리',
+        labelStyle: const TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
+          color: _kTextSoft,
+        ),
+        hintStyle: const TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+          color: Color(0xFFC0B8B2),
+        ),
+        contentPadding: const EdgeInsets.fromLTRB(15, 15, 15, 15),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: _kBorder),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: _kPrimary, width: 1.2),
+        ),
+      ),
+      style: const TextStyle(
+        fontSize: 15,
+        fontWeight: FontWeight.w800,
+        color: _kTextStrong,
+        letterSpacing: -0.2,
+      ),
+    );
+  }
+
+  Widget _buildIndustryDropdown() {
+    final options = _industryOptions();
+
+    return DropdownButtonFormField<String>(
+      initialValue: _safeInitialValue(selectedIndustry, options),
+      items: options
+          .map(
+            (item) => DropdownMenuItem<String>(
+              value: item,
+              child: Text(
+                item,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          )
+          .toList(growable: false),
+      onChanged: (value) {
+        setState(() {
+          selectedIndustry = value;
+        });
+      },
+      decoration: _dropdownDecoration(
+        label: '업종',
+        hint: '업종을 선택해주세요',
+      ),
+      style: const TextStyle(
+        fontSize: 15,
+        fontWeight: FontWeight.w800,
+        color: _kTextStrong,
+        letterSpacing: -0.2,
+      ),
+      dropdownColor: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      isExpanded: true,
+    );
+  }
+
+  Widget _buildRegionDropdown() {
+    final options = _regionOptions();
+
+    return DropdownButtonFormField<String>(
+      initialValue: _safeInitialValue(selectedRegion, options),
+      items: options
+          .map(
+            (item) => DropdownMenuItem<String>(
+              value: item,
+              child: Text(
+                item,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          )
+          .toList(growable: false),
+      onChanged: (value) {
+        setState(() {
+          selectedRegion = value;
+        });
+      },
+      decoration: _dropdownDecoration(
+        label: '지역',
+        hint: '지역을 선택해주세요',
+      ),
+      style: const TextStyle(
+        fontSize: 15,
+        fontWeight: FontWeight.w800,
+        color: _kTextStrong,
+        letterSpacing: -0.2,
+      ),
+      dropdownColor: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      isExpanded: true,
+    );
+  }
+
+  String? _safeInitialValue(String? value, List<String> options) {
+    final normalized = value?.trim();
+    if (normalized == null || normalized.isEmpty) return null;
+    if (!options.contains(normalized)) return null;
+    return normalized;
+  }
+
+  InputDecoration _dropdownDecoration({
+    required String label,
+    required String hint,
+  }) {
+    return InputDecoration(
+      filled: true,
+      fillColor: _kInputFill,
+      labelText: label,
+      hintText: hint,
+      labelStyle: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w700,
+        color: _kTextSoft,
+      ),
+      hintStyle: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w600,
+        color: Color(0xFFC0B8B2),
+      ),
+      contentPadding: const EdgeInsets.fromLTRB(15, 15, 15, 15),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: const BorderSide(color: _kBorder),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: const BorderSide(color: _kPrimary, width: 1.2),
+      ),
+    );
+  }
+
+  Widget _buildPolicySection() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: allRequiredPoliciesAgreed ? _kPrimary : _kBorder,
+          width: allRequiredPoliciesAgreed ? 1.2 : 1,
+        ),
+      ),
+      child: Column(
+        children: [
+          _buildAllRequiredPolicyRow(),
+          const SizedBox(height: 10),
+          const Divider(height: 1, color: Color(0xFFF1F3F5)),
+          const SizedBox(height: 8),
+          for (final document in AppPolicyDocuments.requiredDocuments)
+            _buildRequiredPolicyRow(document),
+          const SizedBox(height: 8),
+          const Divider(height: 1, color: Color(0xFFF1F3F5)),
+          const SizedBox(height: 8),
+          for (final document in AppPolicyDocuments.optionalDocuments)
+            _buildOptionalPolicyRow(document),
+          const SizedBox(height: 8),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              '필수 정책 동의 버전: ${AppPolicyDocuments.bundleVersion}',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: _kTextSoft,
+                height: 1.35,
+                letterSpacing: -0.1,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAllRequiredPolicyRow() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _setAllRequiredPolicies(!allRequiredPoliciesAgreed),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Icon(
+            allRequiredPoliciesAgreed
+                ? Icons.check_circle_rounded
+                : Icons.radio_button_unchecked_rounded,
+            size: 23,
+            color: allRequiredPoliciesAgreed ? _kPrimary : _kTextSoft,
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              '필수 약관 전체 동의',
+              style: TextStyle(
+                fontSize: 14.5,
+                fontWeight: FontWeight.w900,
+                color: _kTextStrong,
+                height: 1.35,
+                letterSpacing: -0.25,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRequiredPolicyRow(AppPolicyDocument document) {
+    final checked = agreedRequiredPolicyTypes.contains(document.type);
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 4),
+      child: Row(
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _toggleRequiredPolicy(document),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(0, 7, 8, 7),
+              child: Icon(
+                checked
+                    ? Icons.check_circle_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 21,
+                color: checked ? _kPrimary : _kTextSoft,
+              ),
+            ),
+          ),
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _toggleRequiredPolicy(document),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 7),
+                child: Text(
+                  '[필수] ${document.label} 동의',
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w800,
+                    color: _kTextStrong,
+                    height: 1.35,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () => _openPolicyDocument(document),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              foregroundColor: _kTextSoft,
+            ),
+            child: const Text(
+              '보기',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.15,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOptionalPolicyRow(AppPolicyDocument document) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 4),
+      child: Row(
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              setState(() {
+                pushAgreed = !pushAgreed;
+              });
+            },
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(0, 7, 8, 7),
+              child: Icon(
+                pushAgreed
+                    ? Icons.check_circle_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 21,
+                color: pushAgreed ? _kPrimary : _kTextSoft,
+              ),
+            ),
+          ),
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                setState(() {
+                  pushAgreed = !pushAgreed;
+                });
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 7),
+                child: Text(
+                  '[선택] ${document.label}',
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w800,
+                    color: _kTextStrong,
+                    height: 1.35,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () => _openPolicyDocument(document),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              foregroundColor: _kTextSoft,
+            ),
+            child: const Text(
+              '보기',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.15,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSubmitButton() {
+    return Obx(() {
+      final loading = controller.isCompletingProfileSetup.value;
+
+      return SizedBox(
+        width: double.infinity,
+        height: 52,
+        child: ElevatedButton(
+          onPressed: loading ? null : _submit,
+          style: ElevatedButton.styleFrom(
+            elevation: 0,
+            backgroundColor: _kPrimary,
+            disabledBackgroundColor: const Color(0xFFD8C8C1),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+          ),
+          child: loading
+              ? const SizedBox(
+                  width: 21,
+                  height: 21,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Text(
+                  '가입 완료',
+                  style: TextStyle(
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF9FAFB),
+      appBar: AppBar(
+        title: const Text(
+          '가입 설정',
+          style: TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w900,
+            letterSpacing: -0.3,
+          ),
+        ),
+        centerTitle: false,
+        elevation: 0,
+        backgroundColor: Colors.white,
+        foregroundColor: _kTextStrong,
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 28, 20, 28),
+          physics: const ClampingScrollPhysics(),
+          children: [
+            _buildHeader(),
+            const SizedBox(height: 18),
+            _buildNoticeBox(),
+            const SizedBox(height: 18),
+            _buildNicknameField(),
+            const SizedBox(height: 12),
+            _buildIndustryDropdown(),
+            const SizedBox(height: 12),
+            _buildRegionDropdown(),
+            const SizedBox(height: 16),
+            _buildPolicySection(),
+            const SizedBox(height: 22),
+            _buildSubmitButton(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// END_OF_FILE: lib/features/auth/view/profile_setup_screen.dart

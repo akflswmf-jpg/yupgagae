@@ -1,0 +1,2486 @@
+const admin = require("firebase-admin");
+const { HttpsError, onCall } = require("firebase-functions/v2/https");
+const {
+  buildAuditActor,
+  createAuditLogInTransaction,
+} = require("./audit_log");
+
+const db = admin.firestore();
+const bucket = admin.storage().bucket();
+
+const REGION = "asia-northeast3";
+const REPORT_THRESHOLD = 3;
+const MAX_REASON_LENGTH = 60;
+const DEFAULT_CALLABLE_MAX_INSTANCES = 10;
+const HEAVY_CALLABLE_MAX_INSTANCES = 10;
+
+exports.deletePostOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 30,
+    memory: "512MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    const postId = normalizeString(request.data && request.data.postId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "게시글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+    let extraImageObjectNames = [];
+    let alreadyDeleted = false;
+
+    await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const postSnap = await tx.get(postRef);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const authorId = normalizeString(post.authorId);
+      const currentStatus = normalizeString(post.status || "active");
+
+      if (!authorId || authorId !== caller.userId) {
+        throw new HttpsError("permission-denied", "삭제 권한이 없습니다.");
+      }
+
+      extraImageObjectNames = extractPostStorageObjectNames({
+        postId,
+        post,
+      });
+
+      alreadyDeleted =
+        currentStatus === "deletedByAuthor" || post.deletedAt != null;
+
+      if (alreadyDeleted) {
+        return;
+      }
+
+      tx.update(postRef, {
+        title: "삭제된 게시글입니다.",
+        body: "",
+        imageUrls: [],
+        imagePaths: [],
+        status: "deletedByAuthor",
+        deletedAt: nowIso,
+        updatedAt: nowIso,
+        isSold: false,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "post.deleted_by_author",
+        actor: buildAuditActor(caller),
+        targetType: "post",
+        targetId: postId,
+        postId,
+        targetAuthorId: authorId || "",
+        targetSnapshot: buildPostAuditSnapshot(post),
+        previousStatus: currentStatus || "active",
+        nextStatus: "deletedByAuthor",
+        reason: "author_delete",
+        createdAtIso: nowIso,
+        metadata: {
+          imageObjectCount: extraImageObjectNames.length,
+        },
+      });
+    });
+
+    const deletedImageCount = await deletePostImagesForPost({
+      postId,
+      extraObjectNames: extraImageObjectNames,
+    });
+
+    return {
+      ok: true,
+      postId,
+      status: "deletedByAuthor",
+      alreadyDeleted,
+      deletedImageCount,
+    };
+  }
+);
+
+exports.removePostByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 30,
+    memory: "512MiB",
+    maxInstances: HEAVY_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "게시글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+    let extraImageObjectNames = [];
+    let alreadyRemoved = false;
+
+    await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const postSnap = await tx.get(postRef);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const currentStatus = normalizeString(post.status || "active");
+
+      extraImageObjectNames = extractPostStorageObjectNames({
+        postId,
+        post,
+      });
+
+      alreadyRemoved =
+        currentStatus === "removedByAdmin" || post.adminRemovedAt != null;
+
+      if (alreadyRemoved) {
+        return;
+      }
+
+      const removedReason =
+        getPrimaryReportReason(post) || "관리자 운영정책 위반 제거";
+
+      tx.update(postRef, {
+        title: "관리자에 의해 제거된 게시글입니다.",
+        body: "",
+        imageUrls: [],
+        imagePaths: [],
+        isHiddenByAdmin: false,
+        isReportThresholdReached: false,
+        status: "removedByAdmin",
+        adminRemovedReason: removedReason,
+        adminRemovedAt: nowIso,
+        updatedAt: nowIso,
+        isSold: false,
+      });
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "post",
+        targetId: postId,
+        actionType: "remove",
+        previousStatus: currentStatus || "active",
+        nextStatus: "removedByAdmin",
+        reason: removedReason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "post.removed_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "post",
+        targetId: postId,
+        postId,
+        targetAuthorId: normalizeString(post.authorId),
+        targetSnapshot: buildPostAuditSnapshot(post),
+        actionType: "remove",
+        previousStatus: currentStatus || "active",
+        nextStatus: "removedByAdmin",
+        reason: removedReason,
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+          imageObjectCount: extraImageObjectNames.length,
+        },
+      });
+    });
+
+    const deletedImageCount = await deletePostImagesForPost({
+      postId,
+      extraObjectNames: extraImageObjectNames,
+    });
+
+    return {
+      ok: true,
+      postId,
+      status: "removedByAdmin",
+      alreadyRemoved,
+      deletedImageCount,
+    };
+  }
+);
+
+exports.hidePostByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "게시글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const postSnap = await tx.get(postRef);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const currentStatus = normalizeString(post.status || "active");
+
+      if (
+        currentStatus === "deletedByAuthor" ||
+        currentStatus === "removedByAdmin" ||
+        post.deletedAt != null ||
+        post.adminRemovedAt != null
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "삭제 또는 제거된 게시글은 숨김 처리할 수 없습니다."
+        );
+      }
+
+      if (post.isHiddenByAdmin === true && currentStatus === "hiddenByAdmin") {
+        return;
+      }
+
+      const hiddenReason = getPrimaryReportReason(post) || "운영 정책 위반 가능성";
+
+      tx.update(postRef, {
+        isHiddenByAdmin: true,
+        status: "hiddenByAdmin",
+        adminHiddenReason: hiddenReason,
+        adminHiddenAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "post",
+        targetId: postId,
+        actionType: "hide",
+        previousStatus: currentStatus || "active",
+        nextStatus: "hiddenByAdmin",
+        reason: hiddenReason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "post.hidden_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "post",
+        targetId: postId,
+        postId,
+        targetAuthorId: normalizeString(post.authorId),
+        targetSnapshot: buildPostAuditSnapshot(post),
+        actionType: "hide",
+        previousStatus: currentStatus || "active",
+        nextStatus: "hiddenByAdmin",
+        reason: hiddenReason,
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      status: "hiddenByAdmin",
+    };
+  }
+);
+
+exports.unhidePostByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "게시글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const postSnap = await tx.get(postRef);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const currentStatus = normalizeString(post.status || "active");
+
+      if (
+        currentStatus === "deletedByAuthor" ||
+        currentStatus === "removedByAdmin" ||
+        post.deletedAt != null ||
+        post.adminRemovedAt != null
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "삭제 또는 제거된 게시글은 숨김 해제할 수 없습니다."
+        );
+      }
+
+      tx.update(postRef, {
+        isHiddenByAdmin: false,
+        status:
+          post.isReportThresholdReached === true ? "hiddenByReport" : "active",
+        adminHiddenReason: null,
+        adminHiddenAt: null,
+        updatedAt: nowIso,
+      });
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "post",
+        targetId: postId,
+        actionType: "unhide",
+        previousStatus: currentStatus || "active",
+        nextStatus:
+          post.isReportThresholdReached === true ? "hiddenByReport" : "active",
+        reason: "관리자 숨김 해제",
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "post.unhidden_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "post",
+        targetId: postId,
+        postId,
+        targetAuthorId: normalizeString(post.authorId),
+        targetSnapshot: buildPostAuditSnapshot(post),
+        actionType: "unhide",
+        previousStatus: currentStatus || "active",
+        nextStatus:
+          post.isReportThresholdReached === true ? "hiddenByReport" : "active",
+        reason: "관리자 숨김 해제",
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+    };
+  }
+);
+
+exports.clearPostReportThresholdByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "게시글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const postSnap = await tx.get(postRef);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const currentStatus = normalizeString(post.status || "active");
+
+      if (
+        currentStatus === "deletedByAuthor" ||
+        currentStatus === "removedByAdmin" ||
+        post.deletedAt != null ||
+        post.adminRemovedAt != null
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "삭제 또는 제거된 게시글은 신고 블라인드를 해제할 수 없습니다."
+        );
+      }
+
+      const nextStatus =
+        post.isHiddenByAdmin === true ? "hiddenByAdmin" : "active";
+
+      tx.update(postRef, {
+        isReportThresholdReached: false,
+        status: nextStatus,
+        updatedAt: nowIso,
+      });
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "post",
+        targetId: postId,
+        actionType: "clear_report_threshold",
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason: "관리자 신고 블라인드 해제",
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "post.report_threshold_cleared_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "post",
+        targetId: postId,
+        postId,
+        targetAuthorId: normalizeString(post.authorId),
+        targetSnapshot: buildPostAuditSnapshot(post),
+        actionType: "clear_report_threshold",
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason: "관리자 신고 블라인드 해제",
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+    };
+  }
+);
+
+exports.deleteCommentOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: HEAVY_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    const postId = normalizeString(request.data && request.data.postId);
+    const commentId = normalizeString(request.data && request.data.commentId);
+
+    if (!postId || !commentId) {
+      throw new HttpsError("invalid-argument", "댓글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+    let alreadyDeleted = false;
+
+    await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const commentRef = db.collection("comments").doc(commentId);
+
+      const [postSnap, commentSnap] = await Promise.all([
+        tx.get(postRef),
+        tx.get(commentRef),
+      ]);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      if (!commentSnap.exists) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const comment = commentSnap.data() || {};
+      const authorId = normalizeString(comment.authorId);
+      const currentStatus = normalizeString(comment.status || "active");
+
+      if (normalizeString(comment.postId) !== postId) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      if (!authorId || authorId !== caller.userId) {
+        throw new HttpsError("permission-denied", "삭제 권한이 없습니다.");
+      }
+
+      alreadyDeleted =
+        comment.isDeleted === true ||
+        currentStatus === "deletedByAuthor" ||
+        comment.deletedAt != null;
+
+      if (alreadyDeleted) {
+        return;
+      }
+
+      const currentCommentCount = normalizeCount(post.commentCount);
+      const nextCommentCount = Math.max(0, currentCommentCount - 1);
+
+      tx.update(commentRef, {
+        text: "삭제된 댓글입니다.",
+        isDeleted: true,
+        status: "deletedByAuthor",
+        deletedAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      tx.update(postRef, {
+        commentCount: nextCommentCount,
+        updatedAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "comment.deleted_by_author",
+        actor: buildAuditActor(caller),
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        commentId,
+        targetAuthorId: normalizeString(comment.authorId),
+        targetSnapshot: buildCommentAuditSnapshot(comment),
+        previousStatus: currentStatus || "active",
+        nextStatus: "deletedByAuthor",
+        reason: "author_delete",
+        createdAtIso: nowIso,
+        metadata: {
+          previousCommentCount: currentCommentCount,
+          nextCommentCount,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      commentId,
+      status: "deletedByAuthor",
+      alreadyDeleted,
+    };
+  }
+);
+
+exports.hideCommentByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+    const commentId = normalizeString(request.data && request.data.commentId);
+
+    if (!postId || !commentId) {
+      throw new HttpsError("invalid-argument", "댓글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const commentRef = db.collection("comments").doc(commentId);
+      const commentSnap = await tx.get(commentRef);
+
+      if (!commentSnap.exists) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      const comment = commentSnap.data() || {};
+      const currentStatus = normalizeString(comment.status || "active");
+
+      if (normalizeString(comment.postId) !== postId) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      if (
+        comment.isDeleted === true ||
+        currentStatus === "deletedByAuthor" ||
+        currentStatus === "removedByAdmin" ||
+        comment.deletedAt != null ||
+        comment.adminRemovedAt != null
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "삭제 또는 제거된 댓글은 숨김 처리할 수 없습니다."
+        );
+      }
+
+      const hiddenReason = getPrimaryReportReason(comment) || "운영 정책 위반 가능성";
+
+      tx.update(commentRef, {
+        isHiddenByAdmin: true,
+        status: "hiddenByAdmin",
+        adminHiddenReason: hiddenReason,
+        adminHiddenAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        actionType: "hide",
+        previousStatus: currentStatus || "active",
+        nextStatus: "hiddenByAdmin",
+        reason: hiddenReason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "comment.hidden_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        commentId,
+        targetAuthorId: normalizeString(comment.authorId),
+        targetSnapshot: buildCommentAuditSnapshot(comment),
+        actionType: "hide",
+        previousStatus: currentStatus || "active",
+        nextStatus: "hiddenByAdmin",
+        reason: hiddenReason,
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      commentId,
+      status: "hiddenByAdmin",
+    };
+  }
+);
+
+exports.unhideCommentByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+    const commentId = normalizeString(request.data && request.data.commentId);
+
+    if (!postId || !commentId) {
+      throw new HttpsError("invalid-argument", "댓글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const commentRef = db.collection("comments").doc(commentId);
+      const commentSnap = await tx.get(commentRef);
+
+      if (!commentSnap.exists) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      const comment = commentSnap.data() || {};
+      const currentStatus = normalizeString(comment.status || "active");
+
+      if (normalizeString(comment.postId) !== postId) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      if (
+        comment.isDeleted === true ||
+        currentStatus === "deletedByAuthor" ||
+        currentStatus === "removedByAdmin" ||
+        comment.deletedAt != null ||
+        comment.adminRemovedAt != null
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "삭제 또는 제거된 댓글은 숨김 해제할 수 없습니다."
+        );
+      }
+
+      const nextStatus =
+        comment.isReportThresholdReached === true ? "hiddenByReport" : "active";
+
+      tx.update(commentRef, {
+        isHiddenByAdmin: false,
+        status: nextStatus,
+        adminHiddenReason: null,
+        adminHiddenAt: null,
+        updatedAt: nowIso,
+      });
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        actionType: "unhide",
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason: "관리자 숨김 해제",
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "comment.unhidden_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        commentId,
+        targetAuthorId: normalizeString(comment.authorId),
+        targetSnapshot: buildCommentAuditSnapshot(comment),
+        actionType: "unhide",
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason: "관리자 숨김 해제",
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      commentId,
+    };
+  }
+);
+
+exports.clearCommentReportThresholdByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    mmaxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+    const commentId = normalizeString(request.data && request.data.commentId);
+
+    if (!postId || !commentId) {
+      throw new HttpsError("invalid-argument", "댓글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const commentRef = db.collection("comments").doc(commentId);
+      const commentSnap = await tx.get(commentRef);
+
+      if (!commentSnap.exists) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      const comment = commentSnap.data() || {};
+      const currentStatus = normalizeString(comment.status || "active");
+
+      if (normalizeString(comment.postId) !== postId) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      if (
+        comment.isDeleted === true ||
+        currentStatus === "deletedByAuthor" ||
+        currentStatus === "removedByAdmin" ||
+        comment.deletedAt != null ||
+        comment.adminRemovedAt != null
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "삭제 또는 제거된 댓글은 신고 블라인드를 해제할 수 없습니다."
+        );
+      }
+
+      const nextStatus =
+        comment.isHiddenByAdmin === true ? "hiddenByAdmin" : "active";
+
+      tx.update(commentRef, {
+        isReportThresholdReached: false,
+        status: nextStatus,
+        updatedAt: nowIso,
+      });
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        actionType: "clear_report_threshold",
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason: "관리자 신고 블라인드 해제",
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "comment.report_threshold_cleared_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        commentId,
+        targetAuthorId: normalizeString(comment.authorId),
+        targetSnapshot: buildCommentAuditSnapshot(comment),
+        actionType: "clear_report_threshold",
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason: "관리자 신고 블라인드 해제",
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      commentId,
+    };
+  }
+);
+
+exports.removeCommentByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+    const commentId = normalizeString(request.data && request.data.commentId);
+
+    if (!postId || !commentId) {
+      throw new HttpsError("invalid-argument", "댓글 정보를 찾을 수 없습니다.");
+    }
+
+    const nowIso = new Date().toISOString();
+    let alreadyRemoved = false;
+
+    await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const commentRef = db.collection("comments").doc(commentId);
+
+      const [postSnap, commentSnap] = await Promise.all([
+        tx.get(postRef),
+        tx.get(commentRef),
+      ]);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      if (!commentSnap.exists) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const comment = commentSnap.data() || {};
+      const currentStatus = normalizeString(comment.status || "active");
+
+      if (normalizeString(comment.postId) !== postId) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      alreadyRemoved =
+        currentStatus === "removedByAdmin" || comment.adminRemovedAt != null;
+
+      if (alreadyRemoved) {
+        return;
+      }
+
+      const currentCommentCount = normalizeCount(post.commentCount);
+      const shouldDecrease =
+        comment.isDeleted !== true &&
+        currentStatus !== "deletedByAuthor" &&
+        currentStatus !== "removedByAdmin";
+
+      const nextCommentCount = shouldDecrease
+        ? Math.max(0, currentCommentCount - 1)
+        : currentCommentCount;
+
+      const removedReason =
+        getPrimaryReportReason(comment) || "관리자 운영정책 위반 제거";
+
+      tx.update(commentRef, {
+        text: "관리자에 의해 제거된 댓글입니다.",
+        isDeleted: true,
+        isHiddenByAdmin: false,
+        isReportThresholdReached: false,
+        status: "removedByAdmin",
+        adminRemovedReason: removedReason,
+        adminRemovedAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      if (shouldDecrease) {
+        tx.update(postRef, {
+          commentCount: nextCommentCount,
+          updatedAt: nowIso,
+        });
+      }
+
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        actionType: "remove",
+        previousStatus: currentStatus || "active",
+        nextStatus: "removedByAdmin",
+        reason: removedReason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "comment.removed_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        commentId,
+        targetAuthorId: normalizeString(comment.authorId),
+        targetSnapshot: buildCommentAuditSnapshot(comment),
+        actionType: "remove",
+        previousStatus: currentStatus || "active",
+        nextStatus: "removedByAdmin",
+        reason: removedReason,
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+          previousCommentCount: currentCommentCount,
+          nextCommentCount,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      commentId,
+      status: "removedByAdmin",
+      alreadyRemoved,
+    };
+  }
+);
+
+exports.reportPost = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertCommunityActionAllowed(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+    const reason = normalizeReportReason(request.data && request.data.reason);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "게시글 정보를 찾을 수 없습니다.");
+    }
+
+    if (!reason) {
+      throw new HttpsError("invalid-argument", "신고 사유를 선택하세요.");
+    }
+
+    const reportId = makeReportId({
+      targetType: "post",
+      targetId: postId,
+      reporterId: caller.userId,
+    });
+
+    const nowIso = new Date().toISOString();
+
+    const result = await db.runTransaction(async (tx) => {
+      const postRef = db.collection("posts").doc(postId);
+      const reportRef = db.collection("reports").doc(reportId);
+
+      const [postSnap, reportSnap] = await Promise.all([
+        tx.get(postRef),
+        tx.get(reportRef),
+      ]);
+
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "게시글을 찾을 수 없습니다.");
+      }
+
+      if (reportSnap.exists) {
+        throw new HttpsError("already-exists", "이미 신고한 게시글입니다.");
+      }
+
+      const post = postSnap.data() || {};
+      const authorId = normalizeString(post.authorId);
+
+      if (!authorId) {
+        throw new HttpsError("failed-precondition", "작성자 정보를 찾을 수 없습니다.");
+      }
+
+      if (authorId === caller.userId) {
+        throw new HttpsError("failed-precondition", "본인 글은 신고할 수 없습니다.");
+      }
+
+      if (isPostClosedForReport(post)) {
+        throw new HttpsError("failed-precondition", "이미 처리된 게시글입니다.");
+      }
+
+      const reportedUserIds = normalizeStringSet(post.reportedUserIds);
+
+      if (reportedUserIds.has(caller.userId)) {
+        throw new HttpsError("already-exists", "이미 신고한 게시글입니다.");
+      }
+
+      reportedUserIds.add(caller.userId);
+
+      const reportReasons = normalizeStringArray(post.reportReasons);
+      const reportReasonCounts = normalizeCountMap(post.reportReasonCounts);
+
+      reportReasons.push(reason);
+      reportReasonCounts[reason] = (reportReasonCounts[reason] || 0) + 1;
+
+      const nextReportCount = reportedUserIds.size;
+      const thresholdReached = nextReportCount >= REPORT_THRESHOLD;
+      const currentStatus = normalizeString(post.status || "active");
+
+      const nextStatus = thresholdReached ? "hiddenByReport" : currentStatus;
+
+      tx.update(postRef, {
+        reportedUserIds: Array.from(reportedUserIds),
+        reportReasons,
+        reportReasonCounts,
+        reportCount: nextReportCount,
+        isReportThresholdReached: thresholdReached,
+        status: nextStatus,
+        updatedAt: nowIso,
+      });
+
+      tx.set(reportRef, {
+        id: reportId,
+        targetType: "post",
+        targetId: postId,
+        postId,
+        commentId: null,
+        reporterId: caller.userId,
+        targetAuthorId: authorId,
+        reason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: thresholdReached
+          ? "post.report_threshold_reached"
+          : "post.reported",
+        actor: buildAuditActor(caller),
+        targetType: "post",
+        targetId: postId,
+        postId,
+        targetAuthorId: authorId,
+        targetSnapshot: buildPostAuditSnapshot(post),
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason,
+        createdAtIso: nowIso,
+        metadata: {
+          reportId,
+          reportCount: nextReportCount,
+          threshold: REPORT_THRESHOLD,
+        },
+      });
+
+      return {
+        reportCount: nextReportCount,
+        isReportThresholdReached: thresholdReached,
+      };
+    });
+
+    return {
+      ok: true,
+      ...result,
+    };
+  }
+);
+
+exports.reportComment = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertCommunityActionAllowed(caller);
+
+    const postId = normalizeString(request.data && request.data.postId);
+    const commentId = normalizeString(request.data && request.data.commentId);
+    const reason = normalizeReportReason(request.data && request.data.reason);
+
+    if (!postId || !commentId) {
+      throw new HttpsError("invalid-argument", "댓글 정보를 찾을 수 없습니다.");
+    }
+
+    if (!reason) {
+      throw new HttpsError("invalid-argument", "신고 사유를 선택하세요.");
+    }
+
+    const reportId = makeReportId({
+      targetType: "comment",
+      targetId: commentId,
+      reporterId: caller.userId,
+    });
+
+    const nowIso = new Date().toISOString();
+
+    const result = await db.runTransaction(async (tx) => {
+      const commentRef = db.collection("comments").doc(commentId);
+      const reportRef = db.collection("reports").doc(reportId);
+
+      const [commentSnap, reportSnap] = await Promise.all([
+        tx.get(commentRef),
+        tx.get(reportRef),
+      ]);
+
+      if (!commentSnap.exists) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      if (reportSnap.exists) {
+        throw new HttpsError("already-exists", "이미 신고한 댓글입니다.");
+      }
+
+      const comment = commentSnap.data() || {};
+      const authorId = normalizeString(comment.authorId);
+
+      if (normalizeString(comment.postId) !== postId) {
+        throw new HttpsError("not-found", "댓글을 찾을 수 없습니다.");
+      }
+
+      if (!authorId) {
+        throw new HttpsError("failed-precondition", "작성자 정보를 찾을 수 없습니다.");
+      }
+
+      if (authorId === caller.userId) {
+        throw new HttpsError("failed-precondition", "본인 댓글은 신고할 수 없습니다.");
+      }
+
+      if (isCommentClosedForReport(comment)) {
+        throw new HttpsError("failed-precondition", "이미 처리된 댓글입니다.");
+      }
+
+      const reportedUserIds = normalizeStringSet(comment.reportedUserIds);
+
+      if (reportedUserIds.has(caller.userId)) {
+        throw new HttpsError("already-exists", "이미 신고한 댓글입니다.");
+      }
+
+      reportedUserIds.add(caller.userId);
+
+      const reportReasons = normalizeStringArray(comment.reportReasons);
+      const reportReasonCounts = normalizeCountMap(comment.reportReasonCounts);
+
+      reportReasons.push(reason);
+      reportReasonCounts[reason] = (reportReasonCounts[reason] || 0) + 1;
+
+      const nextReportCount = reportedUserIds.size;
+      const thresholdReached = nextReportCount >= REPORT_THRESHOLD;
+      const currentStatus = normalizeString(comment.status || "active");
+
+      const nextStatus = thresholdReached ? "hiddenByReport" : currentStatus;
+
+      tx.update(commentRef, {
+        reportedUserIds: Array.from(reportedUserIds),
+        reportReasons,
+        reportReasonCounts,
+        reportCount: nextReportCount,
+        isReportThresholdReached: thresholdReached,
+        status: nextStatus,
+        updatedAt: nowIso,
+      });
+
+      tx.set(reportRef, {
+        id: reportId,
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        commentId,
+        reporterId: caller.userId,
+        targetAuthorId: authorId,
+        reason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: thresholdReached
+          ? "comment.report_threshold_reached"
+          : "comment.reported",
+        actor: buildAuditActor(caller),
+        targetType: "comment",
+        targetId: commentId,
+        postId,
+        commentId,
+        targetAuthorId: authorId,
+        targetSnapshot: buildCommentAuditSnapshot(comment),
+        previousStatus: currentStatus || "active",
+        nextStatus,
+        reason,
+        createdAtIso: nowIso,
+        metadata: {
+          reportId,
+          reportCount: nextReportCount,
+          threshold: REPORT_THRESHOLD,
+        },
+      });
+
+      return {
+        reportCount: nextReportCount,
+        isReportThresholdReached: thresholdReached,
+      };
+    });
+
+    return {
+      ok: true,
+      ...result,
+    };
+  }
+);
+
+exports.sanctionUserByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const targetUserId = normalizeString(request.data && request.data.userId);
+    const sanctionType = normalizeString(
+      request.data && request.data.sanctionType
+    );
+    const reason = normalizeSanctionReason(
+      request.data && request.data.reason
+    );
+
+    if (!targetUserId) {
+      throw new HttpsError("invalid-argument", "제재할 사용자를 찾을 수 없습니다.");
+    }
+
+    if (!isValidSanctionType(sanctionType)) {
+      throw new HttpsError("invalid-argument", "제재 유형이 올바르지 않습니다.");
+    }
+
+    if (!reason) {
+      throw new HttpsError("invalid-argument", "제재 사유를 입력해주세요.");
+    }
+
+    if (targetUserId === caller.userId) {
+      throw new HttpsError("failed-precondition", "본인 계정은 제재할 수 없습니다.");
+    }
+
+    const now = admin.firestore.Timestamp.now();
+    const nowDate = now.toDate();
+    const nowIso = nowDate.toISOString();
+    const sanctionUntil = resolveSanctionUntil({
+      sanctionType,
+      baseDate: nowDate,
+    });
+    const nextSanctionStatus = resolveSanctionStatus(sanctionType);
+
+    await db.runTransaction(async (tx) => {
+      const targetUserRef = db.collection("users").doc(targetUserId);
+      const targetUserSnap = await tx.get(targetUserRef);
+
+      if (!targetUserSnap.exists) {
+        throw new HttpsError("not-found", "사용자를 찾을 수 없습니다.");
+      }
+
+      const targetUser = targetUserSnap.data() || {};
+      const previousRole = normalizeString(targetUser.role) || "user";
+      const previousSanctionStatus =
+        normalizeString(targetUser.sanctionStatus) || "normal";
+
+      if (previousRole === "admin") {
+        throw new HttpsError("failed-precondition", "관리자는 제재할 수 없습니다.");
+      }
+
+      const previousSanctionUntil = targetUser.sanctionUntil || null;
+      const sanctionRef = db.collection("user_sanctions").doc();
+      const actionRef = db.collection("admin_actions").doc();
+
+      const nextRole =
+        sanctionType === "permanent_banned" ? "banned" : previousRole;
+      const roleBeforeBan =
+        previousRole === "banned"
+          ? normalizeString(targetUser.sanctionPreviousRole) || "user"
+          : previousRole;
+
+      tx.set(sanctionRef, {
+        id: sanctionRef.id,
+        targetUserId,
+        actionType: sanctionType,
+        sanctionStatus: nextSanctionStatus,
+        reason,
+        previousRole,
+        previousSanctionStatus,
+        previousSanctionUntil,
+        sanctionUntil,
+        createdAt: now,
+        createdAtIso: nowIso,
+        createdBy: caller.userId,
+      });
+
+      const targetUserPatch = {
+        role: nextRole,
+        sanctionStatus: nextSanctionStatus,
+        sanctionReason: reason,
+        sanctionUntil,
+        sanctionUpdatedAt: now,
+        sanctionUpdatedAtIso: nowIso,
+        sanctionUpdatedBy: caller.userId,
+        sanctionPreviousRole:
+          sanctionType === "permanent_banned" ? roleBeforeBan : null,
+        lastSanctionId: sanctionRef.id,
+        updatedAt: now,
+      };
+
+      if (nextSanctionStatus === "warned") {
+        targetUserPatch.lastWarningAcknowledgedAt = null;
+        targetUserPatch.lastWarningAcknowledgedAtIso = null;
+      }
+
+      tx.set(
+        targetUserRef,
+        targetUserPatch,
+        {
+          merge: true,
+        }
+      );
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "user",
+        targetId: targetUserId,
+        actionType: sanctionType,
+        previousStatus: previousSanctionStatus,
+        nextStatus: nextSanctionStatus,
+        reason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "user.sanctioned_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "user",
+        targetId: targetUserId,
+        targetAuthorId: targetUserId,
+        actionType: sanctionType,
+        previousStatus: previousSanctionStatus,
+        nextStatus: nextSanctionStatus,
+        reason,
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+          sanctionId: sanctionRef.id,
+          previousRole,
+          nextRole,
+          sanctionUntil: sanctionUntil
+            ? sanctionUntil.toDate().toISOString()
+            : null,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      userId: targetUserId,
+      sanctionType,
+      sanctionStatus: nextSanctionStatus,
+      sanctionUntil: sanctionUntil ? sanctionUntil.toDate().toISOString() : null,
+    };
+  }
+);
+
+exports.clearUserSanctionByAdminOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    assertAdmin(caller);
+
+    const targetUserId = normalizeString(request.data && request.data.userId);
+    const reason =
+      normalizeSanctionReason(request.data && request.data.reason) ||
+      "관리자 제재 해제";
+
+    if (!targetUserId) {
+      throw new HttpsError("invalid-argument", "제재 해제할 사용자를 찾을 수 없습니다.");
+    }
+
+    const now = admin.firestore.Timestamp.now();
+    const nowIso = now.toDate().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const targetUserRef = db.collection("users").doc(targetUserId);
+      const targetUserSnap = await tx.get(targetUserRef);
+
+      if (!targetUserSnap.exists) {
+        throw new HttpsError("not-found", "사용자를 찾을 수 없습니다.");
+      }
+
+      const targetUser = targetUserSnap.data() || {};
+      const previousRole = normalizeString(targetUser.role) || "user";
+      const previousSanctionStatus =
+        normalizeString(targetUser.sanctionStatus) || "normal";
+      const previousSanctionUntil = targetUser.sanctionUntil || null;
+      const restoreRole = resolveRestoreRoleAfterSanctionClear(targetUser);
+
+      if (previousRole === "admin") {
+        throw new HttpsError("failed-precondition", "관리자는 제재 해제 대상이 아닙니다.");
+      }
+
+      const sanctionRef = db.collection("user_sanctions").doc();
+      const actionRef = db.collection("admin_actions").doc();
+
+      tx.set(sanctionRef, {
+        id: sanctionRef.id,
+        targetUserId,
+        actionType: "clear",
+        sanctionStatus: "normal",
+        reason,
+        previousRole,
+        previousSanctionStatus,
+        previousSanctionUntil,
+        sanctionUntil: null,
+        createdAt: now,
+        createdAtIso: nowIso,
+        createdBy: caller.userId,
+      });
+
+      tx.set(
+        targetUserRef,
+        {
+          role: restoreRole,
+          sanctionStatus: "normal",
+          sanctionReason: null,
+          sanctionUntil: null,
+          sanctionUpdatedAt: now,
+          sanctionUpdatedAtIso: nowIso,
+          sanctionUpdatedBy: caller.userId,
+          sanctionPreviousRole: null,
+          lastSanctionId: sanctionRef.id,
+          updatedAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+
+      tx.set(actionRef, {
+        id: actionRef.id,
+        targetType: "user",
+        targetId: targetUserId,
+        actionType: "clear_sanction",
+        previousStatus: previousSanctionStatus,
+        nextStatus: "normal",
+        reason,
+        createdAt: nowIso,
+      });
+
+      createAuditLogInTransaction(tx, {
+        eventType: "user.sanction_cleared_by_admin",
+        actor: buildAuditActor(caller),
+        targetType: "user",
+        targetId: targetUserId,
+        targetAuthorId: targetUserId,
+        actionType: "clear_sanction",
+        previousStatus: previousSanctionStatus,
+        nextStatus: "normal",
+        reason,
+        createdAtIso: nowIso,
+        metadata: {
+          adminActionId: actionRef.id,
+          sanctionId: sanctionRef.id,
+          previousRole,
+          restoreRole,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      userId: targetUserId,
+      sanctionStatus: "normal",
+    };
+  }
+);
+
+
+
+exports.acknowledgeLatestWarningOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+
+    const now = admin.firestore.Timestamp.now();
+    const nowIso = now.toDate().toISOString();
+
+    await db.runTransaction(async (tx) => {
+      const userSnap = await tx.get(caller.userRef);
+
+      if (!userSnap.exists) {
+        throw new HttpsError("not-found", "사용자를 찾을 수 없습니다.");
+      }
+
+      const user = userSnap.data() || {};
+      const sanctionStatus = normalizeString(user.sanctionStatus) || "normal";
+
+      if (sanctionStatus !== "warned") {
+        return;
+      }
+
+      tx.set(
+        caller.userRef,
+        {
+          lastWarningAcknowledgedAt: now,
+          lastWarningAcknowledgedAtIso: nowIso,
+          updatedAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+    });
+
+    const updatedSnap = await caller.userRef.get();
+    const updatedUser = updatedSnap.data() || {};
+
+    return {
+      ok: true,
+      userId: caller.userId,
+      sanctionStatus: normalizeString(updatedUser.sanctionStatus) || "normal",
+      lastWarningAcknowledgedAtIso:
+        normalizeString(updatedUser.lastWarningAcknowledgedAtIso) || nowIso,
+    };
+  }
+);
+exports.fetchMyBlockedUsersOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+
+    const snap = await db
+      .collection("user_blocks")
+      .where("ownerUserId", "==", caller.userId)
+      .limit(500)
+      .get();
+
+    const items = snap.docs
+      .map((doc) => {
+        const data = doc.data() || {};
+
+        return {
+          id: normalizeString(data.id || doc.id),
+          userId: normalizeString(data.targetUserId),
+          nickname: normalizeString(data.targetNickname) || "익명",
+          industry: normalizeString(data.targetIndustry) || null,
+          region: normalizeString(data.targetRegion) || null,
+          status: normalizeString(data.status) || "active",
+          blockedAtIso:
+            normalizeString(data.blockedAtIso) ||
+            timestampToIsoString(data.blockedAt),
+          updatedAtIso:
+            normalizeString(data.updatedAtIso) ||
+            timestampToIsoString(data.updatedAt),
+        };
+      })
+      .filter((item) => item.userId && item.status === "active")
+      .sort((a, b) => {
+        return normalizeString(b.blockedAtIso).localeCompare(
+          normalizeString(a.blockedAtIso)
+        );
+      });
+
+    return {
+      ok: true,
+      items,
+    };
+  }
+);
+
+exports.blockUserOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    const targetUserId = normalizeString(request.data && request.data.userId);
+    const requestedNickname = normalizeString(
+      request.data && request.data.nickname
+    );
+    const requestedIndustry = normalizeString(
+      request.data && request.data.industry
+    );
+    const requestedRegion = normalizeString(request.data && request.data.region);
+    const reason = normalizeBlockReason(request.data && request.data.reason);
+
+    if (!targetUserId) {
+      throw new HttpsError("invalid-argument", "차단할 사용자를 찾을 수 없습니다.");
+    }
+
+    if (targetUserId === caller.userId) {
+      throw new HttpsError("failed-precondition", "본인은 차단할 수 없습니다.");
+    }
+
+    const now = admin.firestore.Timestamp.now();
+    const nowIso = now.toDate().toISOString();
+    const blockId = buildUserBlockId({
+      ownerUserId: caller.userId,
+      targetUserId,
+    });
+
+    let responseItem = null;
+
+    await db.runTransaction(async (tx) => {
+      const targetUserRef = db.collection("users").doc(targetUserId);
+      const targetUserSnap = await tx.get(targetUserRef);
+
+      if (!targetUserSnap.exists) {
+        throw new HttpsError("not-found", "차단할 사용자를 찾을 수 없습니다.");
+      }
+
+            const targetUser = targetUserSnap.data() || {};
+      const targetNickname =
+        resolveUserNickname(targetUser) || requestedNickname || "익명";
+      const targetIndustry =
+        resolveUserIndustry(targetUser) || requestedIndustry || null;
+      const targetRegion =
+        resolveUserRegion(targetUser) || requestedRegion || null;
+
+      const blockRef = db.collection("user_blocks").doc(blockId);
+      const blockSnap = await tx.get(blockRef);
+
+      const previousStatus = blockSnap.exists
+        ? normalizeString((blockSnap.data() || {}).status) || "active"
+        : "none";
+
+      tx.set(
+        blockRef,
+        {
+          id: blockId,
+          ownerUserId: caller.userId,
+          targetUserId,
+          targetNickname,
+          targetIndustry,
+          targetRegion,
+          reason: reason || null,
+          status: "active",
+          createdAt: blockSnap.exists
+            ? (blockSnap.data() || {}).createdAt || now
+            : now,
+          createdAtIso: blockSnap.exists
+            ? normalizeString((blockSnap.data() || {}).createdAtIso) || nowIso
+            : nowIso,
+          blockedAt: now,
+          blockedAtIso: nowIso,
+          unblockedAt: null,
+          unblockedAtIso: null,
+          updatedAt: now,
+          updatedAtIso: nowIso,
+        },
+        {
+          merge: false,
+        }
+      );
+
+      createAuditLogInTransaction(tx, {
+        eventType: "user.blocked",
+        actor: buildAuditActor(caller),
+        targetType: "user",
+        targetId: targetUserId,
+        targetAuthorId: targetUserId,
+        actionType: "block_user",
+        previousStatus,
+        nextStatus: "active",
+        reason: reason || null,
+        createdAtIso: nowIso,
+        metadata: {
+          blockId,
+          targetNickname,
+          targetIndustry,
+          targetRegion,
+        },
+      });
+
+      responseItem = {
+        id: blockId,
+        userId: targetUserId,
+        nickname: targetNickname,
+        industry: targetIndustry,
+        region: targetRegion,
+        status: "active",
+        blockedAtIso: nowIso,
+        updatedAtIso: nowIso,
+      };
+    });
+
+    return {
+      ok: true,
+      item: responseItem,
+    };
+  }
+);
+
+exports.unblockUserOnServer = onCall(
+  {
+    region: REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: DEFAULT_CALLABLE_MAX_INSTANCES,
+    invoker: "public",
+  },
+  async (request) => {
+    const caller = await resolveCaller(request);
+    const targetUserId = normalizeString(request.data && request.data.userId);
+
+    if (!targetUserId) {
+      throw new HttpsError("invalid-argument", "차단 해제할 사용자를 찾을 수 없습니다.");
+    }
+
+    if (targetUserId === caller.userId) {
+      throw new HttpsError("failed-precondition", "본인은 차단 해제 대상이 아닙니다.");
+    }
+
+    const now = admin.firestore.Timestamp.now();
+    const nowIso = now.toDate().toISOString();
+    const blockId = buildUserBlockId({
+      ownerUserId: caller.userId,
+      targetUserId,
+    });
+
+    await db.runTransaction(async (tx) => {
+      const blockRef = db.collection("user_blocks").doc(blockId);
+      const blockSnap = await tx.get(blockRef);
+
+      if (!blockSnap.exists) {
+        return;
+      }
+
+      const block = blockSnap.data() || {};
+      const previousStatus = normalizeString(block.status) || "active";
+
+      tx.set(
+        blockRef,
+        {
+          ...block,
+          id: blockId,
+          ownerUserId: caller.userId,
+          targetUserId,
+          status: "unblocked",
+          unblockedAt: now,
+          unblockedAtIso: nowIso,
+          updatedAt: now,
+          updatedAtIso: nowIso,
+        },
+        {
+          merge: false,
+        }
+      );
+
+      createAuditLogInTransaction(tx, {
+        eventType: "user.unblocked",
+        actor: buildAuditActor(caller),
+        targetType: "user",
+        targetId: targetUserId,
+        targetAuthorId: targetUserId,
+        actionType: "unblock_user",
+        previousStatus,
+        nextStatus: "unblocked",
+        reason: "사용자 차단 해제",
+        createdAtIso: nowIso,
+        metadata: {
+          blockId,
+        },
+      });
+    });
+
+    return {
+      ok: true,
+      userId: targetUserId,
+      status: "unblocked",
+    };
+  }
+);
+async function resolveCaller(request) {
+  if (!request.auth || !request.auth.uid) {
+    throw new HttpsError("unauthenticated", "로그인이 필요한 기능입니다.");
+  }
+
+  const firebaseUid = normalizeString(request.auth.uid);
+  const authLinkRef = db.collection("auth_links").doc(firebaseUid);
+  const authLinkSnap = await authLinkRef.get();
+
+  if (!authLinkSnap.exists) {
+    throw new HttpsError("permission-denied", "로그인이 필요한 기능입니다.");
+  }
+
+  const authLink = authLinkSnap.data() || {};
+  const userId = normalizeString(authLink.userId);
+
+  if (!userId) {
+    throw new HttpsError("permission-denied", "로그인이 필요한 기능입니다.");
+  }
+
+  const userRef = db.collection("users").doc(userId);
+  const userSnap = await userRef.get();
+
+  if (!userSnap.exists) {
+    throw new HttpsError("permission-denied", "사용자 정보를 찾을 수 없습니다.");
+  }
+
+  const user = userSnap.data() || {};
+
+  if (normalizeString(user.firebaseUid) !== firebaseUid) {
+    throw new HttpsError("permission-denied", "사용자 정보가 일치하지 않습니다.");
+  }
+
+  if (normalizeString(user.status) !== "active") {
+    throw new HttpsError("permission-denied", "정상 이용 가능한 계정이 아닙니다.");
+  }
+
+  if (user.isDeleted === true) {
+    throw new HttpsError("permission-denied", "탈퇴 처리된 계정입니다.");
+  }
+
+  if (user.profileSetupCompleted !== true) {
+    throw new HttpsError("failed-precondition", "가입 설정을 먼저 완료해주세요.");
+  }
+
+  return {
+    userId,
+    firebaseUid,
+    userRef,
+    user,
+  };
+}
+
+function isPostClosedForReport(post) {
+  const status = normalizeString(post.status);
+
+  return (
+    status === "hiddenByReport" ||
+    status === "hiddenByAdmin" ||
+    status === "deletedByAuthor" ||
+    status === "removedByAdmin" ||
+    post.isReportThresholdReached === true ||
+    post.isHiddenByAdmin === true ||
+    post.deletedAt != null ||
+    post.adminRemovedAt != null
+  );
+}
+
+function isCommentClosedForReport(comment) {
+  const status = normalizeString(comment.status);
+
+  return (
+    status === "hiddenByReport" ||
+    status === "hiddenByAdmin" ||
+    status === "deletedByAuthor" ||
+    status === "removedByAdmin" ||
+    comment.isReportThresholdReached === true ||
+    comment.isHiddenByAdmin === true ||
+    comment.isDeleted === true ||
+    comment.deletedAt != null ||
+    comment.adminRemovedAt != null
+  );
+}
+
+function makeReportId({ targetType, targetId, reporterId }) {
+  return `${targetType}_${targetId}_${reporterId}`;
+}
+
+function assertCommunityActionAllowed(caller) {
+  const user = caller && caller.user ? caller.user : {};
+  const role = normalizeString(user.role);
+  const sanctionStatus = normalizeString(user.sanctionStatus) || "normal";
+
+  if (role === "banned" || sanctionStatus === "permanent_banned") {
+    throw new HttpsError(
+      "permission-denied",
+      "영구정지된 계정은 이 기능을 이용할 수 없습니다."
+    );
+  }
+
+  if (sanctionStatus === "suspended") {
+    const sanctionUntil = toDateOrNull(user.sanctionUntil);
+
+    if (!sanctionUntil || sanctionUntil.getTime() > Date.now()) {
+      throw new HttpsError(
+        "permission-denied",
+        "정지 기간 중에는 이 기능을 이용할 수 없습니다."
+      );
+    }
+  }
+}
+
+function isValidSanctionType(value) {
+  return [
+    "warned",
+    "suspend_3d",
+    "suspend_7d",
+    "permanent_banned",
+  ].includes(normalizeString(value));
+}
+
+function resolveSanctionStatus(sanctionType) {
+  const safeType = normalizeString(sanctionType);
+
+  if (safeType === "warned") {
+    return "warned";
+  }
+
+  if (safeType === "suspend_3d" || safeType === "suspend_7d") {
+    return "suspended";
+  }
+
+  if (safeType === "permanent_banned") {
+    return "permanent_banned";
+  }
+
+  return "normal";
+}
+
+function resolveSanctionUntil({ sanctionType, baseDate }) {
+  const safeType = normalizeString(sanctionType);
+  const base = baseDate instanceof Date ? baseDate : new Date();
+
+  if (safeType === "suspend_3d") {
+    return admin.firestore.Timestamp.fromDate(
+      new Date(base.getTime() + 3 * 24 * 60 * 60 * 1000)
+    );
+  }
+
+  if (safeType === "suspend_7d") {
+    return admin.firestore.Timestamp.fromDate(
+      new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000)
+    );
+  }
+
+  return null;
+}
+
+function resolveRestoreRoleAfterSanctionClear(user) {
+  const src = user && typeof user === "object" ? user : {};
+  const currentRole = normalizeString(src.role) || "user";
+  const previousRole = normalizeString(src.sanctionPreviousRole);
+
+  if (currentRole === "banned") {
+    if (previousRole && previousRole !== "banned" && previousRole !== "admin") {
+      return previousRole;
+    }
+
+    return "user";
+  }
+
+  return currentRole;
+}
+
+function normalizeSanctionReason(value) {
+function resolveUserStoreProfile(user) {
+  const src = user && typeof user === "object" ? user : {};
+  const storeProfile =
+    src.storeProfile && typeof src.storeProfile === "object"
+      ? src.storeProfile
+      : {};
+
+  return storeProfile;
+}
+
+function resolveUserNickname(user) {
+  const src = user && typeof user === "object" ? user : {};
+  const storeProfile = resolveUserStoreProfile(src);
+
+  return (
+    normalizeString(storeProfile.nickname) ||
+    normalizeString(src.nickname) ||
+    ""
+  );
+}
+
+function resolveUserIndustry(user) {
+  const src = user && typeof user === "object" ? user : {};
+  const storeProfile = resolveUserStoreProfile(src);
+
+  return (
+    normalizeString(storeProfile.industry) ||
+    normalizeString(src.industry) ||
+    ""
+  );
+}
+
+function resolveUserRegion(user) {
+  const src = user && typeof user === "object" ? user : {};
+  const storeProfile = resolveUserStoreProfile(src);
+
+  return (
+    normalizeString(storeProfile.region) ||
+    normalizeString(src.region) ||
+    ""
+  );
+}
+  const reason = normalizeString(value).replace(/\s+/g, " ").trim();
+
+  if (!reason) {
+    return "";
+  }
+
+  if (reason.length > MAX_REASON_LENGTH) {
+    return reason.slice(0, MAX_REASON_LENGTH);
+  }
+
+  return reason;
+}
+
+
+function normalizeBlockReason(value) {
+  const reason = normalizeString(value).replace(/\s+/g, " ").trim();
+
+  if (!reason) {
+    return "";
+  }
+
+  if (reason.length > MAX_REASON_LENGTH) {
+    return reason.slice(0, MAX_REASON_LENGTH);
+  }
+
+  return reason;
+}
+
+function buildUserBlockId({ ownerUserId, targetUserId }) {
+  const owner = normalizeString(ownerUserId);
+  const target = normalizeString(targetUserId);
+
+  if (!owner || !target) {
+    return "";
+  }
+
+  return `${owner}_${target}`;
+}
+
+function timestampToIsoString(value) {
+  const date = toDateOrNull(value);
+
+  if (date == null) {
+    return "";
+  }
+
+  return date.toISOString();
+}
+function toDateOrNull(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (typeof value.toDate === "function") {
+    const date = value.toDate();
+    return date instanceof Date && Number.isFinite(date.getTime()) ? date : null;
+  }
+
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function assertAdmin(caller) {
+  const role = normalizeString(caller && caller.user && caller.user.role);
+
+  if (role !== "admin") {
+    throw new HttpsError("permission-denied", "관리자 권한이 필요합니다.");
+  }
+}
+
+async function deletePostImagesForPost({
+  postId,
+  extraObjectNames,
+}) {
+  const safePostId = normalizeString(postId);
+
+  if (!safePostId) {
+    return 0;
+  }
+
+  const prefix = `posts/${safePostId}/images/`;
+  let deletedCount = 0;
+
+  try {
+    const [files] = await bucket.getFiles({
+      prefix,
+    });
+
+    if (files.length > 0) {
+      await Promise.all(
+        files.map((file) =>
+          file.delete({
+            ignoreNotFound: true,
+          })
+        )
+      );
+
+      deletedCount += files.length;
+    }
+  } catch (error) {
+    throw new HttpsError(
+      "internal",
+      "게시글 이미지를 삭제하는 중 문제가 발생했습니다."
+    );
+  }
+
+  const extraNames = normalizeStringArray(extraObjectNames)
+    .map((item) => normalizeStorageObjectName(item))
+    .filter((item) => item.length > 0)
+    .filter((item) => item.startsWith(prefix));
+
+  const uniqueExtraNames = Array.from(new Set(extraNames));
+
+  for (const objectName of uniqueExtraNames) {
+    try {
+      await bucket.file(objectName).delete({
+        ignoreNotFound: true,
+      });
+
+      deletedCount += 1;
+    } catch (error) {
+      const code = error && error.code ? String(error.code) : "";
+
+      if (code === "404") {
+        continue;
+      }
+
+      throw new HttpsError(
+        "internal",
+        "게시글 이미지를 삭제하는 중 문제가 발생했습니다."
+      );
+    }
+  }
+
+  return deletedCount;
+}
+
+function extractPostStorageObjectNames({ postId, post }) {
+  const safePostId = normalizeString(postId);
+
+  if (!safePostId || !post || typeof post !== "object") {
+    return [];
+  }
+
+  const rawValues = [
+    ...normalizeStringArray(post.imagePaths),
+    ...normalizeStringArray(post.imageUrls),
+  ];
+
+  const prefix = `posts/${safePostId}/images/`;
+  const result = [];
+
+  rawValues.forEach((rawValue) => {
+    const objectName = normalizeStorageObjectName(rawValue);
+
+    if (!objectName) {
+      return;
+    }
+
+    if (!objectName.startsWith(prefix)) {
+      return;
+    }
+
+    result.push(objectName);
+  });
+
+  return Array.from(new Set(result));
+}
+
+function normalizeStorageObjectName(value) {
+  const raw = normalizeString(value);
+
+  if (!raw) {
+    return "";
+  }
+
+  if (raw.startsWith("gs://")) {
+    const withoutScheme = raw.slice("gs://".length);
+    const slashIndex = withoutScheme.indexOf("/");
+
+    if (slashIndex < 0) {
+      return "";
+    }
+
+    return decodeURIComponent(withoutScheme.slice(slashIndex + 1)).trim();
+  }
+
+  const encodedMarker = "/o/";
+  const markerIndex = raw.indexOf(encodedMarker);
+
+  if (markerIndex >= 0) {
+    const afterMarker = raw.slice(markerIndex + encodedMarker.length);
+    const queryIndex = afterMarker.indexOf("?");
+
+    const encodedPath =
+      queryIndex >= 0 ? afterMarker.slice(0, queryIndex) : afterMarker;
+
+    try {
+      return decodeURIComponent(encodedPath).trim();
+    } catch (_) {
+      return "";
+    }
+  }
+
+  if (raw.startsWith("posts/")) {
+    return raw;
+  }
+
+  return "";
+}
+
+function buildPostAuditSnapshot(post) {
+  const src = post && typeof post === "object" ? post : {};
+
+  return {
+    postTitlePreview: truncateAuditText(src.title, 80),
+    postBodyPreview: truncateAuditText(src.body, 120),
+    boardType: normalizeString(src.boardType) || null,
+    usedType: normalizeString(src.usedType) || null,
+    targetAuthorId: normalizeString(src.authorId) || null,
+    targetAuthorLabel: normalizeString(src.authorLabel) || null,
+    targetIndustryId: normalizeString(src.industryId) || null,
+    targetLocationLabel: normalizeString(src.locationLabel) || null,
+    status: normalizeString(src.status) || null,
+    reportCount: normalizeCount(src.reportCount),
+  };
+}
+
+function buildCommentAuditSnapshot(comment) {
+  const src = comment && typeof comment === "object" ? comment : {};
+
+  return {
+    commentTextPreview: truncateAuditText(src.text, 120),
+    parentId: normalizeString(src.parentId) || null,
+    postId: normalizeString(src.postId) || null,
+    targetAuthorId: normalizeString(src.authorId) || null,
+    targetAuthorLabel: normalizeString(src.authorLabel) || null,
+    targetIndustryId: normalizeString(src.industryId) || null,
+    targetLocationLabel: normalizeString(src.locationLabel) || null,
+    status: normalizeString(src.status) || null,
+    reportCount: normalizeCount(src.reportCount),
+  };
+}
+
+function truncateAuditText(value, maxLength) {
+  const text = normalizeString(value)
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!text) {
+    return null;
+  }
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength)}…`;
+}
+
+function getPrimaryReportReason(value) {
+  const src = value && typeof value === "object" ? value : {};
+  const counts = normalizeCountMap(src.reportReasonCounts);
+
+  let bestReason = "";
+  let bestCount = 0;
+
+  Object.entries(counts).forEach(([reason, count]) => {
+    if (count > bestCount) {
+      bestReason = reason;
+      bestCount = count;
+    }
+  });
+
+  if (bestReason) {
+    return bestReason;
+  }
+
+  const reasons = normalizeStringArray(src.reportReasons);
+  return reasons.length > 0 ? reasons[0] : "";
+}
+
+function normalizeReportReason(value) {
+  const reason = normalizeString(value);
+
+  if (!reason) {
+    return "";
+  }
+
+  if (reason.length > MAX_REASON_LENGTH) {
+    return reason.slice(0, MAX_REASON_LENGTH);
+  }
+
+  return reason;
+}
+
+function normalizeString(value) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  return String(value).trim();
+}
+
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => normalizeString(item))
+    .filter((item) => item.length > 0);
+}
+
+function normalizeStringSet(value) {
+  return new Set(normalizeStringArray(value));
+}
+
+function normalizeCount(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.floor(value));
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor(parsed));
+}
+
+function normalizeCountMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const result = {};
+
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const key = normalizeString(rawKey);
+    const count = normalizeCount(rawValue);
+
+    if (!key || count <= 0) {
+      continue;
+    }
+
+    result[key] = count;
+  }
+
+  return result;
+}

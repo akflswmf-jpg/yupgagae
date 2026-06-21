@@ -1,0 +1,54 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isImageFile() {
+      return request.resource != null
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    function isSafeImageSize() {
+      return request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+    }
+
+    function isSafePostId(postId) {
+      return postId is string
+        && postId.size() >= 8
+        && postId.size() <= 128
+        && !postId.matches('.*\\.\\..*')
+        && !postId.matches('.*/.*');
+    }
+
+    function isSafeImageName(imageName) {
+      return imageName is string
+        && imageName.size() >= 8
+        && imageName.size() <= 180
+        && !imageName.matches('.*\\.\\..*')
+        && !imageName.matches('.*/.*');
+    }
+
+    match /posts/{postId}/images/{imageName} {
+      allow read: if true;
+
+      allow create: if signedIn()
+        && isSafePostId(postId)
+        && isSafeImageName(imageName)
+        && isImageFile()
+        && isSafeImageSize();
+
+      allow update: if false;
+
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
