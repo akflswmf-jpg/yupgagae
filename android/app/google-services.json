@@ -58,6 +58,22 @@
       },
       "oauth_client": [
         {
+          "client_id": "182457641442-bjige2vlvd7d08lb0eoh3gemkstm1mb2.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.yupgagae.app",
+            "certificate_hash": "352e8296979e26699ed2a84262e15bd3d885db13"
+          }
+        },
+        {
+          "client_id": "182457641442-jmvli45crk0s28h93tjnfaolcev5lsn2.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.yupgagae.app",
+            "certificate_hash": "66be61bf7fe2c418f712e2de6c323e1d2dce7629"
+          }
+        },
+        {
           "client_id": "182457641442-cdtjjo2e03gnutaqrpn6l76i4inke3rv.apps.googleusercontent.com",
           "client_type": 3
         }

@@ -437,6 +437,11 @@ class WritePostController extends GetxController {
     final manualTitle = title.value.trim();
     final resolvedBody = body.value.trim();
 
+    if (manualTitle.isNotEmpty && manualTitle.length < 2) {
+      error.value = '제목은 2자 이상 입력해주세요.';
+      return false;
+    }
+
     if (manualTitle.length > maxTitleLength) {
       error.value = '제목은 $maxTitleLength자 이내로 입력해주세요.';
       return false;

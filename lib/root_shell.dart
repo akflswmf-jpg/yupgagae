@@ -54,9 +54,6 @@ class _RootShellState extends State<RootShell> {
   static const Color _inactiveTabColor = Color(0xFF9CA3AF);
   static const Duration _homeSoftRefreshCooldown = Duration(seconds: 30);
 
-  static const String _homeBottomIconAsset =
-      'assets/icons/yupgagae_bottom_shop.png';
-
   static int _resolveInitialIndex() {
     final args = Get.arguments;
 
@@ -452,10 +449,9 @@ class _RootShellState extends State<RootShell> {
   }
 
   Widget _buildHomeIcon({required bool active}) {
-    return ImageIcon(
-      const AssetImage(_homeBottomIconAsset),
+    return Icon(
+      active ? Icons.home_rounded : Icons.home_outlined,
       size: active ? 28 : 25,
-      color: active ? kYupgagaeAccent : _inactiveTabColor,
     );
   }
 
