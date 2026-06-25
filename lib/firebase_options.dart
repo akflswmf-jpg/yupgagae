@@ -51,21 +51,19 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyCkV9Mg8Ch3VphphGvMNrJOz0A0MHMJQwQ',
-    appId: '1:182457641442:android:101a690e18837e6765b1bb',
+    appId: '1:182457641442:android:687944c7439aae5d65b1bb',
     messagingSenderId: '182457641442',
     projectId: 'yupgagae-app',
     storageBucket: 'yupgagae-app.firebasestorage.app',
   );
-
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyCpeW5-_o-tWHa5ZR9FEpsjk04kTqN_V8o',
-    appId: '1:182457641442:ios:ac6d4d6b9a565e2965b1bb',
+    appId: '1:182457641442:ios:a03f776c9f33a57565b1bb',
     messagingSenderId: '182457641442',
     projectId: 'yupgagae-app',
     storageBucket: 'yupgagae-app.firebasestorage.app',
     androidClientId: '182457641442-4c04ldcd18f3o1t8b1gheo21i858ei4q.apps.googleusercontent.com',
-    iosClientId: '182457641442-72fcehu2lvnge5ja86pn0omi0dek1o79.apps.googleusercontent.com',
-    iosBundleId: 'com.example.yupgagae',
+    iosClientId: '182457641442-nc46uj4i2eeh4cbc998mepuma0fe3u8j.apps.googleusercontent.com',
+    iosBundleId: 'com.yupgagae.app',
   );
-
 }
