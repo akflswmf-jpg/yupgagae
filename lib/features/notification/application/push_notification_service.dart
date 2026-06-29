@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -13,22 +14,27 @@ import 'package:yupgagae/routes/app_routes.dart';
 const String _kHighChannelId = 'yupgagae_high';
 const String _kHighChannelName = '옆가게 알림';
 const String _kHighChannelDescription = '댓글, 답글, 하루결 알림을 알려드립니다.';
+const String _kAndroidNotificationIcon = 'ic_stat_yupgagae_notification';
 
 class PushNotificationService extends GetxService {
   final PushNotificationRepository repository;
   final FirebaseMessaging messaging;
+  final FirebaseAuth auth;
   final FlutterLocalNotificationsPlugin localNotifications;
 
   PushNotificationService({
     required this.repository,
     FirebaseMessaging? messaging,
+    FirebaseAuth? auth,
     FlutterLocalNotificationsPlugin? localNotifications,
   })  : messaging = messaging ?? FirebaseMessaging.instance,
+        auth = auth ?? FirebaseAuth.instance,
         localNotifications =
             localNotifications ?? FlutterLocalNotificationsPlugin();
 
   final Rxn<Map<String, String>> lastOpenedPayload = Rxn<Map<String, String>>();
 
+  StreamSubscription<User?>? _authStateSub;
   StreamSubscription<String>? _tokenRefreshSub;
   StreamSubscription<RemoteMessage>? _foregroundMessageSub;
   StreamSubscription<RemoteMessage>? _openedMessageSub;
@@ -38,6 +44,8 @@ class PushNotificationService extends GetxService {
   bool _isRouting = false;
   bool _localNotificationInitialized = false;
 
+  String? _lastRegisteredToken;
+  String? _lastRegisteredUserUid;
   String? _lastRouteSignature;
   DateTime? _lastRouteAt;
 
@@ -51,11 +59,15 @@ class PushNotificationService extends GetxService {
       await _requestPermission();
       await _configureForegroundPresentation();
 
-      await _registerCurrentToken();
-
+      _listenAuthState();
       _listenTokenRefresh();
       _listenForegroundMessages();
       _listenOpenedMessages();
+
+      await _registerCurrentTokenIfAuthenticated(
+        reason: 'service_start',
+        force: false,
+      );
 
       await _handleInitialMessage();
 
@@ -70,11 +82,17 @@ class PushNotificationService extends GetxService {
   }
 
   Future<void> refreshTokenRegistration() async {
-    await _registerCurrentToken();
+    await _registerCurrentTokenIfAuthenticated(
+      reason: 'manual_refresh',
+      force: true,
+    );
   }
 
   Future<void> deleteCurrentToken() async {
     try {
+      final user = auth.currentUser;
+      if (user == null) return;
+
       final token = await messaging.getToken();
       if (token == null || token.trim().isEmpty) return;
 
@@ -82,11 +100,39 @@ class PushNotificationService extends GetxService {
         token: token,
         platform: _platformKey,
       );
+
+      if (_lastRegisteredToken == token) {
+        _lastRegisteredToken = null;
+        _lastRegisteredUserUid = null;
+      }
     } catch (e) {
       if (kDebugMode) {
         debugPrint('deleteCurrentToken failed: $e');
       }
     }
+  }
+
+  void _listenAuthState() {
+    _authStateSub ??= auth.authStateChanges().listen((user) async {
+      if (user == null) {
+        _lastRegisteredUserUid = null;
+        _lastRegisteredToken = null;
+
+        if (kDebugMode) {
+          debugPrint('Push auth state changed: signed out');
+        }
+        return;
+      }
+
+      if (kDebugMode) {
+        debugPrint('Push auth state changed: signed in ${user.uid}');
+      }
+
+      await _registerCurrentTokenIfAuthenticated(
+        reason: 'auth_state_changed',
+        force: true,
+      );
+    });
   }
 
   Future<void> _initializeLocalNotifications() async {
@@ -108,7 +154,9 @@ class PushNotificationService extends GetxService {
 
     await androidPlugin?.createNotificationChannel(androidChannel);
 
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidSettings = AndroidInitializationSettings(
+      _kAndroidNotificationIcon,
+    );
 
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: false,
@@ -158,24 +206,63 @@ class PushNotificationService extends GetxService {
     );
   }
 
-  Future<void> _registerCurrentToken() async {
+  Future<void> _registerCurrentTokenIfAuthenticated({
+    required String reason,
+    required bool force,
+  }) async {
     try {
+      final user = auth.currentUser;
+
+      if (user == null) {
+        if (kDebugMode) {
+          debugPrint('Push token register skipped: auth missing ($reason)');
+        }
+        return;
+      }
+
       final settings = await messaging.getNotificationSettings();
 
       if (!_isPermissionUsable(settings.authorizationStatus)) {
+        if (kDebugMode) {
+          debugPrint(
+            'Push token register skipped: notification permission ${settings.authorizationStatus} ($reason)',
+          );
+        }
         return;
       }
 
       final token = await messaging.getToken();
 
       if (token == null || token.trim().isEmpty) {
+        if (kDebugMode) {
+          debugPrint('Push token register skipped: empty token ($reason)');
+        }
+        return;
+      }
+
+      final normalizedToken = token.trim();
+      final userUid = user.uid.trim();
+
+      if (!force &&
+          _lastRegisteredToken == normalizedToken &&
+          _lastRegisteredUserUid == userUid) {
+        if (kDebugMode) {
+          debugPrint('Push token register skipped: already registered ($reason)');
+        }
         return;
       }
 
       await repository.registerToken(
-        token: token,
+        token: normalizedToken,
         platform: _platformKey,
       );
+
+      _lastRegisteredToken = normalizedToken;
+      _lastRegisteredUserUid = userUid;
+
+      if (kDebugMode) {
+        debugPrint('Push token registered: $reason / $userUid');
+      }
     } catch (e) {
       if (kDebugMode) {
         debugPrint('registerCurrentToken failed: $e');
@@ -186,10 +273,29 @@ class PushNotificationService extends GetxService {
   void _listenTokenRefresh() {
     _tokenRefreshSub ??= messaging.onTokenRefresh.listen((token) async {
       try {
+        final user = auth.currentUser;
+
+        if (user == null) {
+          if (kDebugMode) {
+            debugPrint('onTokenRefresh skipped: auth missing');
+          }
+          return;
+        }
+
+        final normalizedToken = token.trim();
+        if (normalizedToken.isEmpty) return;
+
         await repository.registerToken(
-          token: token,
+          token: normalizedToken,
           platform: _platformKey,
         );
+
+        _lastRegisteredToken = normalizedToken;
+        _lastRegisteredUserUid = user.uid.trim();
+
+        if (kDebugMode) {
+          debugPrint('Push token refreshed and registered: ${user.uid}');
+        }
       } catch (e) {
         if (kDebugMode) {
           debugPrint('onTokenRefresh register failed: $e');
@@ -247,6 +353,7 @@ class PushNotificationService extends GetxService {
       ticker: '옆가게 알림',
       category: AndroidNotificationCategory.message,
       visibility: NotificationVisibility.public,
+      icon: _kAndroidNotificationIcon,
     );
 
     const iosDetails = DarwinNotificationDetails(
@@ -587,10 +694,12 @@ class PushNotificationService extends GetxService {
 
   @override
   void onClose() {
+    _authStateSub?.cancel();
     _tokenRefreshSub?.cancel();
-    _foregroundMessageSub?.cancel();
     _openedMessageSub?.cancel();
+    _foregroundMessageSub?.cancel();
 
+    _authStateSub = null;
     _tokenRefreshSub = null;
     _foregroundMessageSub = null;
     _openedMessageSub = null;

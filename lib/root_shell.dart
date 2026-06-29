@@ -33,16 +33,18 @@ class _RootShellState extends State<RootShell> {
 
   int index = _resolveInitialIndex();
 
-  late final List<Widget> pages;
-
   late final AuthController authController;
   late final MyStoreController myStoreController;
+
+  late final List<Widget> pages;
 
   DateTime? _lastHomeSoftRefreshAt;
 
   Worker? _sanctionNoticeWorker;
 
   bool _startupGuardStarted = false;
+  bool _startupReady = false;
+  bool _pagesCreated = false;
   bool _nativeSplashRemoved = false;
   bool _sanctionNoticeOpen = false;
 
@@ -98,13 +100,6 @@ class _RootShellState extends State<RootShell> {
     authController = Get.find<AuthController>();
     myStoreController = Get.find<MyStoreController>();
 
-    pages = <Widget>[
-      const HomeScreen(),
-      const CommunityShell(),
-      const HarugyeolScreen(),
-      const my_store_screen.MyStoreScreen(),
-    ];
-
     _sanctionNoticeWorker = ever<AppUser?>(
       authController.currentUser,
       (user) {
@@ -125,51 +120,76 @@ class _RootShellState extends State<RootShell> {
     if (_startupGuardStarted) return;
     _startupGuardStarted = true;
 
+    AppUser? restoredUser;
+
     try {
       await SchedulerBinding.instance.endOfFrame;
-
-      final user = await authController.restoreCurrentUserForStartup();
-
-      if (!mounted) {
-        _removeNativeSplashSafely();
-        return;
-      }
-
-      _normalizeProtectedInitialTab(user);
-      _scheduleSanctionNotice(user);
-
-      await _removeNativeSplashAfterFirstFrame();
-      _scheduleHomeStartupRefresh();
+      restoredUser = await authController.restoreCurrentUserForStartup();
     } catch (_) {
-      if (!mounted) {
-        _removeNativeSplashSafely();
-        return;
-      }
-
-      _normalizeProtectedInitialTab(null);
-
-      await _removeNativeSplashAfterFirstFrame();
-      _scheduleHomeStartupRefresh();
+      restoredUser = null;
     }
-  }
 
-  void _normalizeProtectedInitialTab(dynamic user) {
-    if (!_isProtectedTab(index)) return;
-
-    if (user == null) {
-      setState(() {
-        index = homeTabIndex;
-      });
+    if (!mounted) {
+      _removeNativeSplashSafely();
       return;
     }
 
-    if (user.needsProfileSetup) {
-      setState(() {
-        index = homeTabIndex;
-      });
+    final normalizedIndex = _normalizedInitialTabIndex(restoredUser);
+    final shouldOpenProfileSetup = _shouldOpenProfileSetup(restoredUser);
 
-      Get.toNamed(AppRoutes.profileSetup);
+    setState(() {
+      index = normalizedIndex;
+      _ensurePagesCreated();
+      _startupReady = true;
+    });
+
+    _scheduleSanctionNotice(restoredUser);
+
+    await _removeNativeSplashAfterFirstFrame();
+
+    if (shouldOpenProfileSetup) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Get.toNamed(AppRoutes.profileSetup);
+      });
     }
+
+    _scheduleHomeStartupRefresh();
+  }
+
+  void _ensurePagesCreated() {
+    if (_pagesCreated) return;
+
+    pages = <Widget>[
+      const HomeScreen(),
+      const CommunityShell(),
+      const HarugyeolScreen(),
+      const my_store_screen.MyStoreScreen(),
+    ];
+
+    _pagesCreated = true;
+  }
+
+  int _normalizedInitialTabIndex(AppUser? user) {
+    if (!_isProtectedTab(index)) {
+      return index;
+    }
+
+    if (user == null) {
+      return homeTabIndex;
+    }
+
+    if (user.needsProfileSetup) {
+      return homeTabIndex;
+    }
+
+    return index;
+  }
+
+  bool _shouldOpenProfileSetup(AppUser? user) {
+    if (!_isProtectedTab(index)) return false;
+    if (user == null) return false;
+    return user.needsProfileSetup;
   }
 
   Future<void> _removeNativeSplashAfterFirstFrame() async {
@@ -199,7 +219,7 @@ class _RootShellState extends State<RootShell> {
       if (!mounted) return;
       if (index != homeTabIndex) return;
 
-      _softRefreshHomeIfAllowed();
+      _softRefreshHomeIfAllowed(force: true);
     });
   }
 
@@ -214,6 +234,8 @@ class _RootShellState extends State<RootShell> {
   }
 
   void _handleTap(int nextIndex) {
+    if (!_startupReady) return;
+
     final user = authController.currentUser.value;
 
     if (_isPublicTab(nextIndex)) {
@@ -261,19 +283,25 @@ class _RootShellState extends State<RootShell> {
     }
   }
 
-  void _softRefreshHomeIfAllowed() {
+  void _softRefreshHomeIfAllowed({
+    bool force = false,
+  }) {
     if (!Get.isRegistered<HomeFeedController>()) return;
 
     final now = DateTime.now();
     final last = _lastHomeSoftRefreshAt;
 
-    if (last != null && now.difference(last) < _homeSoftRefreshCooldown) {
+    if (!force &&
+        last != null &&
+        now.difference(last) < _homeSoftRefreshCooldown) {
       return;
     }
 
     _lastHomeSoftRefreshAt = now;
 
-    unawaited(Get.find<HomeFeedController>().refreshIfStale());
+    unawaited(
+      Get.find<HomeFeedController>().refreshIfStale(force: force),
+    );
   }
 
   void _scheduleSanctionNotice(AppUser? user) {
@@ -448,6 +476,22 @@ class _RootShellState extends State<RootShell> {
     return result == true;
   }
 
+  Widget _buildStartupBody() {
+    return const ColoredBox(
+      color: _backgroundColor,
+      child: Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.2,
+            color: kYupgagaeAccent,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildHomeIcon({required bool active}) {
     return Icon(
       active ? Icons.home_rounded : Icons.home_outlined,
@@ -501,6 +545,13 @@ class _RootShellState extends State<RootShell> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_startupReady || !_pagesCreated) {
+      return Scaffold(
+        backgroundColor: _backgroundColor,
+        body: _buildStartupBody(),
+      );
+    }
+
     return Scaffold(
       backgroundColor: _backgroundColor,
       body: ColoredBox(

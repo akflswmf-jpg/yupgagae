@@ -61,6 +61,7 @@ class HomeFeedController extends GetxController {
 
   final hasCompletedInitialLoad = false.obs;
   final isInitialLoading = true.obs;
+  final initialLoadCompletedCount = 0.obs;
 
   Future<void>? _loadAllFuture;
   StreamSubscription<AdminNotice?>? _noticeSubscription;
@@ -68,6 +69,8 @@ class HomeFeedController extends GetxController {
   DateTime? _lastFullLoadAt;
 
   late final Worker _ownerVerificationWorker;
+
+  Timer? _authChangeReloadDebounce;
 
   int _loadGeneration = 0;
 
@@ -82,6 +85,7 @@ class HomeFeedController extends GetxController {
 
   static const Duration _staleAfter = Duration(seconds: 30);
   static const Duration _feedLoadTimeout = Duration(seconds: 12);
+  static const Duration _emptyConfirmRetryDelay = Duration(milliseconds: 1400);
 
   bool get _canReadFeed {
     return true;
@@ -128,7 +132,16 @@ class HomeFeedController extends GetxController {
   }
 
   bool get shouldShowInitialLoading {
-    return isInitialLoading.value && !hasAnyContent;
+    if (hasAnyContent) return false;
+
+    if (isInitialLoading.value) return true;
+    if (isAnyLoading) return true;
+
+    // 첫 진입에서 한 번 빈 결과가 나와도 바로 "아직 글이 없습니다"로 확정하지 않는다.
+    // 초기 2회 확인 전까지는 로딩으로 유지한다.
+    if (!canShowEmptyState) return true;
+
+    return false;
   }
 
   bool get hasTriedInitialLoad {
@@ -136,7 +149,10 @@ class HomeFeedController extends GetxController {
   }
 
   bool get canShowEmptyState {
-    return hasCompletedInitialLoad.value && !isInitialLoading.value;
+    return hasCompletedInitialLoad.value &&
+        !isInitialLoading.value &&
+        !isAnyLoading &&
+        initialLoadCompletedCount.value >= 2;
   }
 
   bool get isStale {
@@ -168,17 +184,56 @@ class HomeFeedController extends GetxController {
       },
     );
 
-    unawaited(loadAll());
+    unawaited(_bootstrapInitialFeed());
     _watchLatestNotice();
   }
 
   @override
   void onClose() {
+    _authChangeReloadDebounce?.cancel();
     _noticeSubscription?.cancel();
     _ownerVerificationWorker.dispose();
     _invalidateLoad();
     _loadAllFuture = null;
     super.onClose();
+  }
+
+  Future<void> _bootstrapInitialFeed() async {
+    hasCompletedInitialLoad.value = false;
+    isInitialLoading.value = true;
+    initialLoadCompletedCount.value = 0;
+    error.value = null;
+
+    await loadAll();
+
+    if (isClosed) return;
+    if (hasAnyContent) return;
+
+    await Future<void>.delayed(_emptyConfirmRetryDelay);
+
+    if (isClosed) return;
+    if (hasAnyContent) return;
+
+    await _forceReloadAll();
+  }
+
+  Future<void> _forceReloadAll() async {
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    _invalidateLoad();
+
+    _loadAllFuture = null;
+    _lastFullLoadAt = null;
+
+    if (!hasAnyContent) {
+      hasCompletedInitialLoad.value = false;
+      isInitialLoading.value = true;
+    }
+
+    await loadAll();
   }
 
   Future<void> loadAll() {
@@ -225,6 +280,11 @@ class HomeFeedController extends GetxController {
     }
 
     if (!force && hasAnyContent && !isStale) {
+      return;
+    }
+
+    if (force) {
+      await _forceReloadAll();
       return;
     }
 
@@ -293,8 +353,16 @@ class HomeFeedController extends GetxController {
     } finally {
       if (_isCurrentGeneration(generation) && _canReadFeed) {
         _clearPrimaryLoadingFlags();
+
         hasCompletedInitialLoad.value = true;
         isInitialLoading.value = false;
+
+        if (!hasAnyContent) {
+          initialLoadCompletedCount.value =
+              initialLoadCompletedCount.value + 1;
+        } else if (initialLoadCompletedCount.value < 2) {
+          initialLoadCompletedCount.value = 2;
+        }
       }
     }
   }
@@ -661,21 +729,26 @@ class HomeFeedController extends GetxController {
   }
 
   void _handleAuthUserChanged() {
-    _invalidateLoad();
+    refreshOwnerVerification();
 
-    _loadAllFuture = null;
-    _lastFullLoadAt = null;
+    _authChangeReloadDebounce?.cancel();
 
-    _clearAllLoadingFlags();
+    _authChangeReloadDebounce = Timer(
+      const Duration(milliseconds: 150),
+      () {
+        if (isClosed) return;
 
-    _blockedAuthorIds.clear();
+        _blockedAuthorIds.clear();
 
-    if (!hasAnyContent) {
-      hasCompletedInitialLoad.value = false;
-      isInitialLoading.value = true;
-    }
+        if (!hasAnyContent) {
+          hasCompletedInitialLoad.value = false;
+          isInitialLoading.value = true;
+          initialLoadCompletedCount.value = 0;
+        }
 
-    unawaited(loadAll());
+        unawaited(refreshIfStale(force: true));
+      },
+    );
   }
 
   void _resetFeedState() {
@@ -704,7 +777,8 @@ class HomeFeedController extends GetxController {
     error.value = null;
 
     hasCompletedInitialLoad.value = false;
-    isInitialLoading.value = false;
+    isInitialLoading.value = true;
+    initialLoadCompletedCount.value = 0;
   }
 
   void _clearPrimaryLoadingFlags() {

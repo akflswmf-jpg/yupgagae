@@ -1,15 +1,19 @@
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import 'package:yupgagae/features/notification/domain/push_notification_repository.dart';
 
 class CloudFunctionsPushNotificationRepository
     implements PushNotificationRepository {
   final FirebaseFunctions functions;
+  final FirebaseAuth auth;
 
   CloudFunctionsPushNotificationRepository({
     FirebaseFunctions? functions,
-  }) : functions =
-            functions ?? FirebaseFunctions.instanceFor(region: 'asia-northeast3');
+    FirebaseAuth? auth,
+  })  : functions =
+            functions ?? FirebaseFunctions.instanceFor(region: 'asia-northeast3'),
+        auth = auth ?? FirebaseAuth.instance;
 
   @override
   Future<void> registerToken({
@@ -22,11 +26,20 @@ class CloudFunctionsPushNotificationRepository
     if (normalizedToken.isEmpty) return;
     if (normalizedPlatform.isEmpty) return;
 
+    final user = auth.currentUser;
+    if (user == null) return;
+
+    final idToken = await user.getIdToken();
+    final normalizedIdToken = idToken?.trim() ?? '';
+
+    if (normalizedIdToken.isEmpty) return;
+
     final callable = functions.httpsCallable('registerPushToken');
 
     await callable.call({
       'token': normalizedToken,
       'platform': normalizedPlatform,
+      'firebaseIdToken': normalizedIdToken,
     });
   }
 
@@ -41,11 +54,20 @@ class CloudFunctionsPushNotificationRepository
     if (normalizedToken.isEmpty) return;
     if (normalizedPlatform.isEmpty) return;
 
+    final user = auth.currentUser;
+    if (user == null) return;
+
+    final idToken = await user.getIdToken();
+    final normalizedIdToken = idToken?.trim() ?? '';
+
+    if (normalizedIdToken.isEmpty) return;
+
     final callable = functions.httpsCallable('deletePushToken');
 
     await callable.call({
       'token': normalizedToken,
       'platform': normalizedPlatform,
+      'firebaseIdToken': normalizedIdToken,
     });
   }
 }

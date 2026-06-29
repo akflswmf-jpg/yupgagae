@@ -153,6 +153,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildPosts(List<Post> posts) {
     if (posts.isEmpty) {
+      if (!_shouldShowEmptyFeed) {
+        return _buildFeedLoading();
+      }
+
       return const _EmptyBox(message: '아직 글이 없습니다.');
     }
 
@@ -205,6 +209,23 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  bool get _shouldShowEmptyFeed {
+    return controller.canShowEmptyState && !controller.isAnyLoading;
+  }
+
+  Widget _buildFeedLoading() {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 24),
+      child: Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2.2),
+        ),
+      ),
+    );
+  }
+
   Widget _longDivider(String text) {
     return Container(
       color: Colors.white,
@@ -247,6 +268,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final latest = controller.latest;
 
     if (hot.isEmpty && latest.isEmpty) {
+      if (!_shouldShowEmptyFeed) {
+        return _buildFeedLoading();
+      }
+
       return const _EmptyBox(message: '아직 글이 없습니다.');
     }
 
@@ -280,6 +305,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final ownerLatest = controller.ownerLatest;
 
     if (ownerHot.isEmpty && ownerLatest.isEmpty) {
+      if (!_shouldShowEmptyFeed) {
+        return _buildFeedLoading();
+      }
+
       return const _EmptyBox(message: '아직 글이 없습니다.');
     }
 
@@ -456,6 +485,10 @@ class _HomeScreenState extends State<HomeScreen> {
             child: CircularProgressIndicator(),
           ),
         );
+      }
+
+      if (!hasAnyVisiblePost && !_shouldShowEmptyFeed) {
+        return _buildFeedLoading();
       }
 
       return _buildTabFeed();

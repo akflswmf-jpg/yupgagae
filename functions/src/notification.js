@@ -97,6 +97,7 @@ exports.registerPushToken = onCall(
       firebaseUid: resolved.firebaseUid,
       platform,
       tokenHash: tokenId,
+      authSource: resolved.authSource,
     });
 
     return {
@@ -148,6 +149,7 @@ exports.deletePushToken = onCall(
         tokenOwner: ownerUserId,
         tokenHash: tokenId,
         platform,
+        authSource: resolved.authSource,
       });
 
       return {
@@ -163,6 +165,7 @@ exports.deletePushToken = onCall(
       firebaseUid: resolved.firebaseUid,
       platform,
       tokenHash: tokenId,
+      authSource: resolved.authSource,
     });
 
     return {
@@ -971,14 +974,54 @@ function isInvalidPushTokenError(code) {
 }
 
 async function resolveCurrentUserForCallable(request) {
-  if (!request.auth || !request.auth.uid) {
+  const data = request.data || {};
+
+  logger.info("Push callable auth debug", {
+    hasCallableAuth: Boolean(request.auth && request.auth.uid),
+    hasFirebaseIdToken: Boolean(normalizeString(data.firebaseIdToken)),
+    dataKeys: Object.keys(data || {}),
+  });
+
+  let firebaseUid = "";
+  let authSource = "callable";
+
+  if (request.auth && request.auth.uid) {
+    firebaseUid = normalizeString(request.auth.uid);
+  }
+
+  if (!firebaseUid) {
+    const firebaseIdToken = normalizeString(data.firebaseIdToken);
+
+    if (!firebaseIdToken) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Firebase authentication is required."
+      );
+    }
+
+    try {
+      const decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+      firebaseUid = normalizeString(decoded.uid);
+      authSource = "id_token_fallback";
+    } catch (error) {
+      logger.warn("Firebase ID token fallback verification failed", {
+        code: error && error.code ? error.code : "unknown",
+      });
+
+      throw new HttpsError(
+        "unauthenticated",
+        "Firebase authentication is invalid."
+      );
+    }
+  }
+
+  if (!firebaseUid) {
     throw new HttpsError(
       "unauthenticated",
       "Firebase authentication is required."
     );
   }
 
-  const firebaseUid = request.auth.uid;
   const linkRef = db.collection("auth_links").doc(firebaseUid);
   const linkSnapshot = await linkRef.get();
 
@@ -1000,6 +1043,7 @@ async function resolveCurrentUserForCallable(request) {
     firebaseUid,
     userId,
     userRef: db.collection("users").doc(userId),
+    authSource,
   };
 }
 
@@ -1149,7 +1193,6 @@ function isClosedPost(post) {
     status === "removedByAdmin" ||
     post.isReportThresholdReached === true ||
     post.isHiddenByAdmin === true ||
-    post.isRemovedByAdmin === true ||
     post.deletedAt != null ||
     post.adminRemovedAt != null
   );
@@ -1265,6 +1308,7 @@ exports.sendTestPushToMe = onCall(
       sentCount: sendResult.sentCount,
       failedCount: sendResult.failedCount,
       cleanedTokenCount: sendResult.cleanedTokenCount,
+      authSource: resolved.authSource,
     });
 
     return {

@@ -1,0 +1,5037 @@
+﻿
+================================================
+FILE_PATH: lib/features/harugyeol/data/firestore_harugyeol_repository.dart
+================================================
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/app_user.dart';
+import 'package:yupgagae/core/auth/auth_controller.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_comment.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_day_summary.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_entry.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_enums.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_repository.dart';
+
+class FirestoreHarugyeolRepository implements HarugyeolRepository {
+  final FirebaseFirestore firestore;
+  final FirebaseFunctions functions;
+
+  FirestoreHarugyeolRepository({
+    FirebaseFirestore? firestore,
+    FirebaseFunctions? functions,
+  })  : firestore = firestore ?? FirebaseFirestore.instance,
+        functions = functions ??
+            FirebaseFunctions.instanceFor(region: 'asia-northeast3');
+
+  CollectionReference<Map<String, dynamic>> get _daysCol {
+    return firestore.collection('harugyeolDays');
+  }
+
+  AuthController? get _authOrNull {
+    if (!Get.isRegistered<AuthController>()) {
+      return null;
+    }
+
+    return Get.find<AuthController>();
+  }
+
+  AppUser? get _currentUser {
+    return _authOrNull?.currentUser.value;
+  }
+
+  List<String> get _currentUserLookupIds {
+    final user = _currentUser;
+    if (user == null) {
+      return const <String>[];
+    }
+
+    final ids = <String>[
+      user.userId.trim(),
+      user.firebaseUid.trim(),
+    ].where((value) {
+      return value.isNotEmpty;
+    }).toSet().toList(growable: false);
+
+    return ids;
+  }
+
+  String get _primaryCurrentUserId {
+    final ids = _currentUserLookupIds;
+    if (ids.isEmpty) return '';
+    return ids.first;
+  }
+
+  @override
+  Stream<HarugyeolDaySummary> watchDaySummary(String dateKey) {
+    final safeDateKey = dateKey.trim();
+
+    if (safeDateKey.isEmpty) {
+      return Stream.value(HarugyeolDaySummary.empty(dateKey));
+    }
+
+    return _daysCol.doc(safeDateKey).snapshots().map((doc) {
+      return HarugyeolDaySummary.fromJson(
+        safeDateKey,
+        doc.data(),
+      );
+    });
+  }
+
+  @override
+  Stream<List<HarugyeolEntry>> watchMyEntries(String dateKey) {
+    final safeDateKey = dateKey.trim();
+    final lookupIds = _currentUserLookupIds;
+
+    if (safeDateKey.isEmpty || lookupIds.isEmpty) {
+      return Stream.value(const <HarugyeolEntry>[]);
+    }
+
+    final entriesCol = _daysCol.doc(safeDateKey).collection('entries');
+
+    Query<Map<String, dynamic>> query;
+
+    if (lookupIds.length == 1) {
+      query = entriesCol.where('userId', isEqualTo: lookupIds.first);
+    } else {
+      query = entriesCol.where('userId', whereIn: lookupIds);
+    }
+
+    return query.snapshots().map((snap) {
+      final bySlot = <HarugyeolSlot, HarugyeolEntry>{};
+
+      for (final doc in snap.docs) {
+        final entry = HarugyeolEntry.fromJson({
+          ...doc.data(),
+          'id': (doc.data()['id'] ?? doc.id).toString(),
+        });
+
+        final previous = bySlot[entry.slot];
+
+        if (previous == null || entry.updatedAt.isAfter(previous.updatedAt)) {
+          bySlot[entry.slot] = entry;
+        }
+      }
+
+      final list = bySlot.values.toList(growable: false);
+
+      list.sort((a, b) {
+        final slotCompare = a.slot.index.compareTo(b.slot.index);
+        if (slotCompare != 0) return slotCompare;
+
+        final dateCompare = a.createdAt.compareTo(b.createdAt);
+        if (dateCompare != 0) return dateCompare;
+
+        return a.id.compareTo(b.id);
+      });
+
+      return list;
+    });
+  }
+
+  @override
+  Stream<List<HarugyeolComment>> watchComments(String dateKey) {
+    final safeDateKey = dateKey.trim();
+    final userId = _primaryCurrentUserId;
+
+    if (safeDateKey.isEmpty) {
+      return Stream.value(const <HarugyeolComment>[]);
+    }
+
+    return _daysCol
+        .doc(safeDateKey)
+        .collection('comments')
+        .where('status', isEqualTo: 'active')
+        .limit(50)
+        .snapshots()
+        .map((snap) {
+      final list = snap.docs.map((doc) {
+        return HarugyeolComment.fromJson(
+          {
+            ...doc.data(),
+            'id': (doc.data()['id'] ?? doc.id).toString(),
+          },
+          currentUserId: userId,
+        );
+      }).where((comment) {
+        return comment.text.trim().isNotEmpty;
+      }).toList();
+
+      list.sort((a, b) {
+        final likeCompare = b.likeCount.compareTo(a.likeCount);
+        if (likeCompare != 0) return likeCompare;
+
+        final dateCompare = b.createdAt.compareTo(a.createdAt);
+        if (dateCompare != 0) return dateCompare;
+
+        return a.id.compareTo(b.id);
+      });
+
+      return list;
+    });
+  }
+
+  @override
+  Future<void> submitEntry(HarugyeolSubmitInput input) async {
+    final user = _currentUser;
+
+    if (user == null) {
+      throw Exception('로그인이 필요합니다.');
+    }
+
+    if (user.needsProfileSetup) {
+      throw Exception('가입 설정을 먼저 완료해주세요.');
+    }
+
+    if (user.isWithdrawn || user.isSuspended) {
+      throw Exception('현재 계정 상태에서는 이용할 수 없습니다.');
+    }
+
+    final callable = functions.httpsCallable('submitHarugyeolEntry');
+
+    await callable.call({
+      'dateKey': input.dateKey.trim(),
+      'slot': input.slot.key,
+      'mood': input.mood.key,
+      'score': input.mood.score,
+      'reasons': input.reasons.map((e) => e.key).toList(growable: false),
+      'oneLineText': input.oneLineText.trim(),
+      'clientUser': {
+        'userId': user.userId.trim(),
+        'firebaseUid': user.firebaseUid.trim(),
+        'authorLabel': user.nickname?.trim().isNotEmpty == true
+            ? user.nickname!.trim()
+            : '익명',
+        'industryId': user.industry,
+        'locationLabel': user.region,
+        'isOwnerVerified': user.isBusinessVerified,
+      },
+    });
+  }
+
+  @override
+  Future<void> toggleCommentLike({
+    required String dateKey,
+    required String commentId,
+  }) async {
+    final user = _currentUser;
+
+    if (user == null) {
+      throw Exception('로그인이 필요합니다.');
+    }
+
+    if (user.needsProfileSetup) {
+      throw Exception('가입 설정을 먼저 완료해주세요.');
+    }
+
+    final callable = functions.httpsCallable('toggleHarugyeolCommentLike');
+
+    await callable.call({
+      'dateKey': dateKey.trim(),
+      'commentId': commentId.trim(),
+    });
+  }
+}
+
+// END_OF_FILE: lib/features/harugyeol/data/firestore_harugyeol_repository.dart
+
+================================================
+FILE_PATH: lib/features/harugyeol/domain/harugyeol_repository.dart
+================================================
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_comment.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_day_summary.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_entry.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_enums.dart';
+
+class HarugyeolSubmitInput {
+  final String dateKey;
+  final HarugyeolSlot slot;
+  final HarugyeolMood mood;
+  final List<HarugyeolReason> reasons;
+  final String oneLineText;
+
+  const HarugyeolSubmitInput({
+    required this.dateKey,
+    required this.slot,
+    required this.mood,
+    required this.reasons,
+    required this.oneLineText,
+  });
+}
+
+abstract class HarugyeolRepository {
+  Stream<HarugyeolDaySummary> watchDaySummary(String dateKey);
+
+  Stream<List<HarugyeolEntry>> watchMyEntries(String dateKey);
+
+  Stream<List<HarugyeolComment>> watchComments(String dateKey);
+
+  Future<void> submitEntry(HarugyeolSubmitInput input);
+
+  Future<void> toggleCommentLike({
+    required String dateKey,
+    required String commentId,
+  });
+}
+
+// END_OF_FILE: lib/features/harugyeol/domain/harugyeol_repository.dart
+
+================================================
+FILE_PATH: lib/features/harugyeol/domain/harugyeol_entry.dart
+================================================
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_enums.dart';
+
+class HarugyeolEntry {
+  final String id;
+  final String dateKey;
+  final String userId;
+  final String authorLabel;
+  final String? industryId;
+  final String? locationLabel;
+  final bool isOwnerVerified;
+  final HarugyeolSlot slot;
+  final HarugyeolMood mood;
+  final int score;
+  final List<HarugyeolReason> reasons;
+  final String oneLineText;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  const HarugyeolEntry({
+    required this.id,
+    required this.dateKey,
+    required this.userId,
+    required this.authorLabel,
+    required this.industryId,
+    required this.locationLabel,
+    required this.isOwnerVerified,
+    required this.slot,
+    required this.mood,
+    required this.score,
+    required this.reasons,
+    required this.oneLineText,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  bool get hasOneLineText => oneLineText.trim().isNotEmpty;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'dateKey': dateKey,
+      'userId': userId,
+      'authorLabel': authorLabel,
+      'industryId': industryId,
+      'locationLabel': locationLabel,
+      'isOwnerVerified': isOwnerVerified,
+      'slot': slot.key,
+      'mood': mood.key,
+      'score': score,
+      'reasons': reasons.map((e) => e.key).toList(),
+      'oneLineText': oneLineText,
+      'createdAt': createdAt.toIso8601String(),
+      'updatedAt': updatedAt.toIso8601String(),
+    };
+  }
+
+  factory HarugyeolEntry.fromJson(Map<String, dynamic> json) {
+    final mood = harugyeolMoodFromKey(json['mood']?.toString());
+    final slot = harugyeolSlotFromKey(json['slot']?.toString());
+
+    final rawReasons = json['reasons'];
+    final reasons = rawReasons is List
+        ? rawReasons
+            .map((e) => harugyeolReasonFromKey(e?.toString()))
+            .toList(growable: false)
+        : const <HarugyeolReason>[];
+
+    final createdAt = _parseDateTime(json['createdAt']) ?? DateTime.now();
+    final updatedAt = _parseDateTime(json['updatedAt']) ?? createdAt;
+
+    return HarugyeolEntry(
+      id: (json['id'] ?? '').toString(),
+      dateKey: (json['dateKey'] ?? '').toString(),
+      userId: (json['userId'] ?? '').toString(),
+      authorLabel: (json['authorLabel'] ?? '익명').toString(),
+      industryId: _nullableString(json['industryId']),
+      locationLabel: _nullableString(json['locationLabel']),
+      isOwnerVerified: json['isOwnerVerified'] == true,
+      slot: slot ?? HarugyeolSlot.midday,
+      mood: mood,
+      score: (json['score'] as num?)?.toInt() ?? mood.score,
+      reasons: reasons,
+      oneLineText: (json['oneLineText'] ?? '').toString(),
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+    );
+  }
+
+  static String? _nullableString(dynamic value) {
+    final text = value?.toString().trim();
+    if (text == null || text.isEmpty) return null;
+    return text;
+  }
+
+  static DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+
+    if (value is DateTime) {
+      return value;
+    }
+
+    try {
+      final dynamic maybeTimestamp = value;
+      final converted = maybeTimestamp.toDate();
+      if (converted is DateTime) {
+        return converted;
+      }
+    } catch (_) {
+      // Ignore non-Firestore Timestamp values.
+    }
+
+    final text = value.toString().trim();
+    if (text.isEmpty) return null;
+    return DateTime.tryParse(text);
+  }
+}
+
+// END_OF_FILE: lib/features/harugyeol/domain/harugyeol_entry.dart
+
+================================================
+FILE_PATH: lib/features/harugyeol/domain/harugyeol_enums.dart
+================================================
+enum HarugyeolMood {
+  slow,
+  normal,
+  good,
+  great,
+}
+
+extension HarugyeolMoodX on HarugyeolMood {
+  String get key {
+    switch (this) {
+      case HarugyeolMood.slow:
+        return 'slow';
+      case HarugyeolMood.normal:
+        return 'normal';
+      case HarugyeolMood.good:
+        return 'good';
+      case HarugyeolMood.great:
+        return 'great';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case HarugyeolMood.slow:
+        return '한산';
+      case HarugyeolMood.normal:
+        return '무난';
+      case HarugyeolMood.good:
+        return '만족';
+      case HarugyeolMood.great:
+        return '대박';
+    }
+  }
+
+  int get score {
+    switch (this) {
+      case HarugyeolMood.slow:
+        return 10;
+      case HarugyeolMood.normal:
+        return 45;
+      case HarugyeolMood.good:
+        return 75;
+      case HarugyeolMood.great:
+        return 100;
+    }
+  }
+
+  String get emoji {
+    switch (this) {
+      case HarugyeolMood.slow:
+        return '💤';
+      case HarugyeolMood.normal:
+        return '🌿';
+      case HarugyeolMood.good:
+        return '☀️';
+      case HarugyeolMood.great:
+        return '🔥';
+    }
+  }
+
+  String get shortDescription {
+    switch (this) {
+      case HarugyeolMood.slow:
+        return '오늘은 조용했어요';
+      case HarugyeolMood.normal:
+        return '평소랑 비슷했어요';
+      case HarugyeolMood.good:
+        return '괜찮은 하루였어요';
+      case HarugyeolMood.great:
+        return '장사 잘 된 날이에요';
+    }
+  }
+}
+
+HarugyeolMood harugyeolMoodFromKey(String? value) {
+  switch ((value ?? '').trim()) {
+    case 'slow':
+      return HarugyeolMood.slow;
+    case 'normal':
+      return HarugyeolMood.normal;
+    case 'good':
+      return HarugyeolMood.good;
+    case 'great':
+      return HarugyeolMood.great;
+    default:
+      return HarugyeolMood.normal;
+  }
+}
+
+enum HarugyeolReason {
+  economy,
+  weekdayHoliday,
+  delivery,
+  localMood,
+  event,
+  groupGuest,
+  rudeGuest,
+  unexpectedGood,
+  weather,
+  etc,
+}
+
+extension HarugyeolReasonX on HarugyeolReason {
+  String get key {
+    switch (this) {
+      case HarugyeolReason.economy:
+        return 'economy';
+      case HarugyeolReason.weekdayHoliday:
+        return 'weekdayHoliday';
+      case HarugyeolReason.delivery:
+        return 'delivery';
+      case HarugyeolReason.localMood:
+        return 'localMood';
+      case HarugyeolReason.event:
+        return 'event';
+      case HarugyeolReason.groupGuest:
+        return 'groupGuest';
+      case HarugyeolReason.rudeGuest:
+        return 'rudeGuest';
+      case HarugyeolReason.unexpectedGood:
+        return 'unexpectedGood';
+      case HarugyeolReason.weather:
+        return 'weather';
+      case HarugyeolReason.etc:
+        return 'etc';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case HarugyeolReason.economy:
+        return '경기 영향';
+      case HarugyeolReason.weekdayHoliday:
+        return '연휴';
+      case HarugyeolReason.delivery:
+        return '배달';
+      case HarugyeolReason.localMood:
+        return '상권 분위기';
+      case HarugyeolReason.event:
+        return '행사/이벤트';
+      case HarugyeolReason.groupGuest:
+        return '단체손님';
+      case HarugyeolReason.rudeGuest:
+        return '진상';
+      case HarugyeolReason.unexpectedGood:
+        return '뜻밖의 선전';
+      case HarugyeolReason.weather:
+        return '날씨';
+      case HarugyeolReason.etc:
+        return '기타';
+    }
+  }
+}
+
+HarugyeolReason harugyeolReasonFromKey(String? value) {
+  switch ((value ?? '').trim()) {
+    case 'economy':
+      return HarugyeolReason.economy;
+
+    case 'weekday':
+    case 'weekdayHoliday':
+      return HarugyeolReason.weekdayHoliday;
+
+    case 'deliveryDown':
+    case 'delivery':
+      return HarugyeolReason.delivery;
+
+    case 'localMood':
+      return HarugyeolReason.localMood;
+
+    case 'event':
+      return HarugyeolReason.event;
+
+    case 'groupGuest':
+      return HarugyeolReason.groupGuest;
+
+    case 'rudeGuest':
+      return HarugyeolReason.rudeGuest;
+
+    case 'unexpectedGood':
+      return HarugyeolReason.unexpectedGood;
+
+    case 'weather':
+      return HarugyeolReason.weather;
+
+    case 'etc':
+      return HarugyeolReason.etc;
+
+    default:
+      return HarugyeolReason.etc;
+  }
+}
+
+enum HarugyeolSlot {
+  midday,
+  evening,
+}
+
+extension HarugyeolSlotX on HarugyeolSlot {
+  String get key {
+    switch (this) {
+      case HarugyeolSlot.midday:
+        return 'midday';
+      case HarugyeolSlot.evening:
+        return 'evening';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case HarugyeolSlot.midday:
+        return '낮 장사';
+      case HarugyeolSlot.evening:
+        return '저녁 장사';
+    }
+  }
+
+  String get shortLabel {
+    switch (this) {
+      case HarugyeolSlot.midday:
+        return '낮';
+      case HarugyeolSlot.evening:
+        return '저녁';
+    }
+  }
+
+  String get timeLabel {
+    switch (this) {
+      case HarugyeolSlot.midday:
+        return '오전 11시 ~ 오후 5시';
+      case HarugyeolSlot.evening:
+        return '오후 5시 1분 ~ 자정';
+    }
+  }
+
+  String get resultTimeLabel {
+    switch (this) {
+      case HarugyeolSlot.midday:
+        return '오전 11시 ~ 오후 5시';
+      case HarugyeolSlot.evening:
+        return '오후 5시 1분 ~ 자정';
+    }
+  }
+}
+
+HarugyeolSlot? harugyeolSlotFromKey(String? value) {
+  switch ((value ?? '').trim()) {
+    case 'midday':
+      return HarugyeolSlot.midday;
+    case 'evening':
+      return HarugyeolSlot.evening;
+    default:
+      return null;
+  }
+}
+
+List<HarugyeolSlot> availableHarugyeolInputSlots(DateTime now) {
+  final minutes = (now.hour * 60) + now.minute;
+
+  const middayStart = 11 * 60;
+  const eveningStart = (17 * 60) + 1;
+  const dayEnd = (23 * 60) + 59;
+
+  if (minutes < middayStart || minutes > dayEnd) {
+    return const <HarugyeolSlot>[];
+  }
+
+  if (minutes >= eveningStart) {
+    return const <HarugyeolSlot>[
+      HarugyeolSlot.midday,
+      HarugyeolSlot.evening,
+    ];
+  }
+
+  return const <HarugyeolSlot>[
+    HarugyeolSlot.midday,
+  ];
+}
+
+HarugyeolSlot? currentHarugyeolSlot(DateTime now) {
+  final minutes = (now.hour * 60) + now.minute;
+
+  const middayStart = 11 * 60;
+  const middayEnd = 17 * 60;
+  const eveningStart = (17 * 60) + 1;
+  const eveningEnd = (23 * 60) + 59;
+
+  if (minutes >= middayStart && minutes <= middayEnd) {
+    return HarugyeolSlot.midday;
+  }
+
+  if (minutes >= eveningStart && minutes <= eveningEnd) {
+    return HarugyeolSlot.evening;
+  }
+
+  return null;
+}
+
+// END_OF_FILE: lib/features/harugyeol/domain/harugyeol_enums.dart
+
+================================================
+FILE_PATH: functions/index.js
+================================================
+const axios = require("axios");
+const crypto = require("crypto");
+const admin = require("firebase-admin");
+const { HttpsError, onCall } = require("firebase-functions/v2/https");
+const { logger } = require("firebase-functions");
+const { defineSecret } = require("firebase-functions/params");
+
+admin.initializeApp();
+
+const db = admin.firestore();
+
+const harugyeol = require("./src/harugyeol");
+const community = require("./src/community");
+const notification = require("./src/notification");
+
+exports.submitHarugyeolEntry = harugyeol.submitHarugyeolEntry;
+exports.toggleHarugyeolCommentLike = harugyeol.toggleHarugyeolCommentLike;
+
+exports.reportPost = community.reportPost;
+exports.reportComment = community.reportComment;
+exports.deletePostOnServer = community.deletePostOnServer;
+exports.deleteCommentOnServer = community.deleteCommentOnServer;
+exports.hidePostByAdminOnServer = community.hidePostByAdminOnServer;
+exports.unhidePostByAdminOnServer = community.unhidePostByAdminOnServer;
+exports.clearPostReportThresholdByAdminOnServer =
+  community.clearPostReportThresholdByAdminOnServer;
+exports.removePostByAdminOnServer = community.removePostByAdminOnServer;
+exports.hideCommentByAdminOnServer = community.hideCommentByAdminOnServer;
+exports.unhideCommentByAdminOnServer = community.unhideCommentByAdminOnServer;
+exports.clearCommentReportThresholdByAdminOnServer =
+  community.clearCommentReportThresholdByAdminOnServer;
+exports.removeCommentByAdminOnServer = community.removeCommentByAdminOnServer;
+exports.sanctionUserByAdminOnServer = community.sanctionUserByAdminOnServer;
+exports.clearUserSanctionByAdminOnServer =
+  community.clearUserSanctionByAdminOnServer;
+
+exports.fetchMyBlockedUsersOnServer = community.fetchMyBlockedUsersOnServer;
+exports.blockUserOnServer = community.blockUserOnServer;
+exports.unblockUserOnServer = community.unblockUserOnServer;
+
+exports.registerPushToken = notification.registerPushToken;
+exports.deletePushToken = notification.deletePushToken;
+exports.sendTestPushToMe = notification.sendTestPushToMe;
+exports.onCommunityCommentCreated = notification.onCommunityCommentCreated;
+exports.sendHarugyeolMiddayReminder = notification.sendHarugyeolMiddayReminder;
+exports.sendHarugyeolEveningReminder = notification.sendHarugyeolEveningReminder;
+
+const NTS_BUSINESS_SERVICE_KEY = defineSecret("NTS_BUSINESS_SERVICE_KEY");
+
+const KAKAO_USER_ME_URL = "https://kapi.kakao.com/v2/user/me";
+const NTS_BUSINESS_VALIDATE_URL =
+  "https://api.odcloud.kr/api/nts-businessman/v1/validate";
+
+const NICKNAME_MIN_LENGTH = 2;
+const NICKNAME_MAX_LENGTH = 10;
+
+const RESERVED_NICKNAME_KEYS = new Set([
+  "admin",
+  "administrator",
+  "manager",
+  "master",
+  "official",
+  "operator",
+  "owner",
+  "staff",
+  "support",
+  "system",
+  "yupgagae",
+  "yeopgagae",
+  "옆가게",
+  "관리자",
+  "운영자",
+  "운영팀",
+  "공식",
+  "공식계정",
+  "시스템",
+  "고객센터",
+  "고객지원",
+  "관리팀",
+  "운영진",
+  "탈퇴사용자",
+]);
+
+const BLOCKED_NICKNAME_KEYWORDS = [
+  "시발",
+  "씨발",
+  "씨팔",
+  "ㅅㅂ",
+  "ㅆㅂ",
+  "ㅂㅅ",
+  "병신",
+  "븅신",
+  "개새",
+  "개색",
+  "개쉐",
+  "개자식",
+  "새끼",
+  "존나",
+  "졸라",
+  "ㅈㄴ",
+  "지랄",
+  "ㅈㄹ",
+  "염병",
+  "닥쳐",
+  "꺼져",
+  "죽어",
+  "미친",
+  "개같",
+  "fuck",
+  "fucking",
+  "shit",
+  "bitch",
+  "bastard",
+  "asshole",
+
+  "섹스",
+  "sex",
+  "sexy",
+  "자위",
+  "딸딸",
+  "성감",
+  "꼴림",
+  "꼴린",
+  "꼴려",
+  "발정",
+  "음란",
+  "변태",
+  "노출",
+  "가슴",
+  "찌찌",
+  "보지",
+  "자지",
+  "꼬추",
+  "질싸",
+  "정액",
+  "삽입",
+  "강간",
+  "성폭행",
+  "성추행",
+  "성매매",
+  "창녀",
+  "창남",
+  "걸레",
+
+  "한남",
+  "한녀",
+  "김치녀",
+  "김치남",
+  "맘충",
+  "여혐",
+  "남혐",
+
+  "장애인",
+  "장애새끼",
+  "도박충",
+  "정신병",
+  "지체아",
+  "자폐",
+
+  "짱깨",
+  "짱개",
+  "쪽바리",
+  "왜놈",
+  "깜둥이",
+  "조센징",
+  "조센",
+
+  "일베",
+  "일베충",
+  "베충",
+  "메갈",
+  "메갈년",
+  "워마드",
+  "좌빨",
+  "우빨",
+  "빨갱이",
+  "문빠",
+  "윤빠",
+
+  "살인",
+  "살인자",
+  "죽인다",
+  "죽여",
+  "칼빵",
+  "도박",
+  "테러",
+  "마약",
+  "필로폰",
+  "강도",
+  "토토",
+  "바카라",
+  "불법",
+];
+exports.signInWithKakao = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  async (request) => {
+    const accessToken = normalizeString(request.data && request.data.accessToken);
+
+    if (!accessToken) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Kakao accessToken is required."
+      );
+    }
+
+    const kakaoUser = await fetchKakaoUser(accessToken);
+    const kakaoId = normalizeKakaoId(kakaoUser && kakaoUser.id);
+
+    if (!kakaoId) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Failed to resolve Kakao user id."
+      );
+    }
+
+    const firebaseUid = `kakao:${kakaoId}`;
+    const kakaoAccount = kakaoUser.kakao_account || {};
+    const profile = kakaoAccount.profile || {};
+
+    const email = normalizeString(kakaoAccount.email);
+    const displayName = normalizeString(profile.nickname);
+    const photoUrl = normalizeString(profile.profile_image_url);
+
+    const appUser = await ensureUserProfile({
+      firebaseUid,
+      provider: "kakao",
+      email,
+      displayName,
+      photoUrl,
+    });
+
+    const customToken = await admin.auth().createCustomToken(firebaseUid, {
+      provider: "kakao",
+      kakaoId,
+      internalUserId: appUser.userId,
+    });
+
+    logger.info("Kakao custom token issued", {
+      firebaseUid,
+      internalUserId: appUser.userId,
+      hasEmail: Boolean(email),
+      hasDisplayName: Boolean(displayName),
+      hasPhotoUrl: Boolean(photoUrl),
+      profileSetupCompleted: appUser.profileSetupCompleted,
+    });
+
+    return {
+      customToken,
+      provider: "kakao",
+      firebaseUid,
+      userId: appUser.userId,
+      kakaoUserId: kakaoId,
+      email: email || null,
+      displayName: displayName || null,
+      photoUrl: photoUrl || null,
+      role: appUser.role,
+      identityStatus: appUser.identityStatus,
+      businessStatus: appUser.businessStatus,
+      profileSetupCompleted: appUser.profileSetupCompleted,
+      termsAgreed: appUser.termsAgreed,
+      nickname: appUser.nickname || null,
+      industry: appUser.industry || null,
+      region: appUser.region || null,
+    };
+  }
+);
+
+exports.ensureAuthUserProfile = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Firebase authentication is required."
+      );
+    }
+
+    const firebaseUid = request.auth.uid;
+    const token = request.auth.token || {};
+    const firebase = token.firebase || {};
+
+    const requestedProvider = normalizeProvider(
+      request.data && request.data.provider
+    );
+
+    const provider =
+      requestedProvider || resolveProvider(firebase.sign_in_provider);
+
+    const email =
+      normalizeString(token.email) ||
+      normalizeString(request.data && request.data.email);
+
+    const displayName =
+      normalizeString(token.name) ||
+      normalizeString(request.data && request.data.displayName);
+
+    const photoUrl =
+      normalizeString(token.picture) ||
+      normalizeString(request.data && request.data.photoUrl);
+
+    const appUser = await ensureUserProfile({
+      firebaseUid,
+      provider,
+      email,
+      displayName,
+      photoUrl,
+    });
+
+    logger.info("Auth user profile ensured", {
+      firebaseUid,
+      internalUserId: appUser.userId,
+      provider,
+      profileSetupCompleted: appUser.profileSetupCompleted,
+    });
+
+    return {
+      userId: appUser.userId,
+      firebaseUid,
+      provider,
+      email: email || null,
+      displayName: displayName || null,
+      photoUrl: photoUrl || null,
+      role: appUser.role,
+      identityStatus: appUser.identityStatus,
+      businessStatus: appUser.businessStatus,
+      profileSetupCompleted: appUser.profileSetupCompleted,
+      termsAgreed: appUser.termsAgreed,
+      nickname: appUser.nickname || null,
+      industry: appUser.industry || null,
+      region: appUser.region || null,
+    };
+  }
+);
+
+exports.completeUserProfileSetup = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Firebase authentication is required."
+      );
+    }
+
+    const firebaseUid = request.auth.uid;
+    const data = request.data || {};
+
+    const termsAgreed = data.termsAgreed === true;
+    const termsVersion = normalizeString(data.termsVersion) || "v1";
+    const pushAgreed = data.pushAgreed === true;
+
+    const nickname = normalizeNickname(data.nickname);
+    const nicknameKey = createNicknameKey(nickname);
+    const industry = normalizeProfileText(data.industry, "industry", 30);
+    const region = normalizeProfileText(data.region, "region", 30);
+
+    if (!termsAgreed) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Terms agreement is required."
+      );
+    }
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const linkRef = db.collection("auth_links").doc(firebaseUid);
+
+    let resolvedUserId = "";
+
+    await db.runTransaction(async (transaction) => {
+      const linkSnapshot = await transaction.get(linkRef);
+
+      if (!linkSnapshot.exists) {
+        throw new HttpsError(
+          "not-found",
+          "Auth link document does not exist."
+        );
+      }
+
+      const linkData = linkSnapshot.data() || {};
+      const userId = normalizeString(linkData.userId);
+
+      if (!userId) {
+        throw new HttpsError(
+          "data-loss",
+          "auth_links document exists but userId is empty."
+        );
+      }
+
+      resolvedUserId = userId;
+
+      const userRef = db.collection("users").doc(userId);
+      const userSnapshot = await transaction.get(userRef);
+
+      if (!userSnapshot.exists) {
+        throw new HttpsError(
+          "not-found",
+          "User document does not exist."
+        );
+      }
+
+      const nicknameRef = db.collection("nicknames").doc(nicknameKey);
+      const nicknameSnapshot = await transaction.get(nicknameRef);
+
+      const userData = userSnapshot.data() || {};
+      const userFirebaseUid = normalizeString(userData.firebaseUid);
+
+      if (userFirebaseUid !== firebaseUid) {
+        throw new HttpsError(
+          "permission-denied",
+          "User document does not belong to current Firebase user."
+        );
+      }
+
+      assertNicknameAvailable({
+        nicknameSnapshot,
+        userId,
+      });
+
+      reserveNickname({
+        transaction,
+        nicknameRef,
+        userId,
+        firebaseUid,
+        nickname,
+        nicknameKey,
+        now,
+      });
+
+      transaction.set(
+        userRef,
+        {
+          profileSetupCompleted: true,
+          terms: {
+            agreed: true,
+            agreedAt: now,
+            version: termsVersion,
+          },
+          notificationConsent: {
+            pushAgreed,
+            pushAgreedAt: pushAgreed ? now : null,
+            pushVersion: termsVersion,
+            updatedAt: now,
+          },
+          storeProfile: {
+            nickname,
+            nicknameKey,
+            industry,
+            region,
+            createdAt:
+              userData.storeProfile && userData.storeProfile.createdAt
+                ? userData.storeProfile.createdAt
+                : now,
+            updatedAt: now,
+          },
+          status: "active",
+          isDeleted: false,
+          updatedAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+    });
+
+    if (!resolvedUserId) {
+      throw new HttpsError("internal", "Failed to resolve internal userId.");
+    }
+
+    const userSnapshot = await db.collection("users").doc(resolvedUserId).get();
+    const userData = userSnapshot.data() || {};
+
+    logger.info("User profile setup completed", {
+      firebaseUid,
+      internalUserId: resolvedUserId,
+      nickname,
+      nicknameKey,
+      industry,
+      region,
+      pushAgreed,
+    });
+
+    return buildAppUserResponse(userData, {
+      fallbackUserId: resolvedUserId,
+      fallbackFirebaseUid: firebaseUid,
+      fallbackProvider: "firebase",
+    });
+  }
+);
+
+exports.updateMyStoreProfile = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Firebase authentication is required."
+      );
+    }
+
+    const firebaseUid = request.auth.uid;
+    const data = request.data || {};
+
+    const nickname = normalizeNickname(data.nickname);
+    const nicknameKey = createNicknameKey(nickname);
+    const industry = normalizeProfileText(data.industry, "industry", 30);
+    const region = normalizeProfileText(data.region, "region", 30);
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const linkRef = db.collection("auth_links").doc(firebaseUid);
+
+    let resolvedUserId = "";
+
+    await db.runTransaction(async (transaction) => {
+      const linkSnapshot = await transaction.get(linkRef);
+
+      if (!linkSnapshot.exists) {
+        throw new HttpsError(
+          "not-found",
+          "Auth link document does not exist."
+        );
+      }
+
+      const linkData = linkSnapshot.data() || {};
+      const userId = normalizeString(linkData.userId);
+
+      if (!userId) {
+        throw new HttpsError(
+          "data-loss",
+          "auth_links document exists but userId is empty."
+        );
+      }
+
+      resolvedUserId = userId;
+
+      const userRef = db.collection("users").doc(userId);
+      const userSnapshot = await transaction.get(userRef);
+
+      if (!userSnapshot.exists) {
+        throw new HttpsError(
+          "not-found",
+          "User document does not exist."
+        );
+      }
+
+      const userData = userSnapshot.data() || {};
+      const userFirebaseUid = normalizeString(userData.firebaseUid);
+
+      if (userFirebaseUid !== firebaseUid) {
+        throw new HttpsError(
+          "permission-denied",
+          "User document does not belong to current Firebase user."
+        );
+      }
+
+      if (userData.profileSetupCompleted !== true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Profile setup must be completed first."
+        );
+      }
+
+      if (
+        normalizeString(userData.status) === "withdrawn" ||
+        userData.isDeleted === true
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Account already withdrawn."
+        );
+      }
+
+      const storeProfile = userData.storeProfile || {};
+      const previousNickname = normalizeString(storeProfile.nickname);
+      const previousNicknameKey =
+        normalizeString(storeProfile.nicknameKey) ||
+        createNicknameKeyForExistingValue(previousNickname);
+
+      const nicknameChanged = previousNicknameKey !== nicknameKey;
+
+      if (nicknameChanged) {
+        const nicknameRef = db.collection("nicknames").doc(nicknameKey);
+        const nicknameSnapshot = await transaction.get(nicknameRef);
+
+        assertNicknameAvailable({
+          nicknameSnapshot,
+          userId,
+        });
+
+        reserveNickname({
+          transaction,
+          nicknameRef,
+          userId,
+          firebaseUid,
+          nickname,
+          nicknameKey,
+          now,
+        });
+
+        if (previousNicknameKey) {
+          const previousNicknameRef =
+            db.collection("nicknames").doc(previousNicknameKey);
+          transaction.delete(previousNicknameRef);
+        }
+      } else if (previousNickname !== nickname) {
+        const nicknameRef = db.collection("nicknames").doc(nicknameKey);
+        const nicknameSnapshot = await transaction.get(nicknameRef);
+
+        assertNicknameAvailable({
+          nicknameSnapshot,
+          userId,
+        });
+
+        reserveNickname({
+          transaction,
+          nicknameRef,
+          userId,
+          firebaseUid,
+          nickname,
+          nicknameKey,
+          now,
+        });
+      }
+
+      transaction.set(
+        userRef,
+        {
+          storeProfile: {
+            nickname,
+            nicknameKey,
+            industry,
+            region,
+            createdAt:
+              userData.storeProfile && userData.storeProfile.createdAt
+                ? userData.storeProfile.createdAt
+                : now,
+            updatedAt: now,
+          },
+          updatedAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+    });
+
+    if (!resolvedUserId) {
+      throw new HttpsError("internal", "Failed to resolve internal userId.");
+    }
+
+    const userSnapshot = await db.collection("users").doc(resolvedUserId).get();
+    const userData = userSnapshot.data() || {};
+
+    logger.info("My store profile updated", {
+      firebaseUid,
+      internalUserId: resolvedUserId,
+      nickname,
+      nicknameKey,
+      industry,
+      region,
+    });
+
+    return buildAppUserResponse(userData, {
+      fallbackUserId: resolvedUserId,
+      fallbackFirebaseUid: firebaseUid,
+      fallbackProvider: "firebase",
+    });
+  }
+);
+
+exports.deleteMyAccountOnServer = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 60,
+    memory: "512MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    let authDeleteTargetUid = resolved.firebaseUid;
+    let resolvedProvider = "firebase";
+    let anonymizedPosts = 0;
+    let anonymizedComments = 0;
+
+    try {
+      await db.runTransaction(async (transaction) => {
+        const userSnapshot = await transaction.get(resolved.userRef);
+
+        if (!userSnapshot.exists) {
+          throw new HttpsError("not-found", "User document does not exist.");
+        }
+
+        const userData = userSnapshot.data() || {};
+        validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+        const currentStatus = normalizeString(userData.status);
+        const alreadyDeleted = userData.isDeleted === true;
+
+        if (currentStatus === "withdrawn" || alreadyDeleted) {
+          throw new HttpsError(
+            "failed-precondition",
+            "Account already withdrawn."
+          );
+        }
+
+        resolvedProvider = normalizeProvider(userData.provider) || "firebase";
+        authDeleteTargetUid =
+          normalizeString(userData.firebaseUid) || resolved.firebaseUid;
+
+        const storeProfile = userData.storeProfile || {};
+        const previousNickname = normalizeString(storeProfile.nickname);
+        const previousNicknameKey =
+          normalizeString(storeProfile.nicknameKey) ||
+          createNicknameKeyForExistingValue(previousNickname);
+
+        if (previousNicknameKey) {
+          transaction.delete(
+            db.collection("nicknames").doc(previousNicknameKey)
+          );
+        }
+
+        transaction.set(
+          resolved.userRef,
+          {
+            status: "withdrawn",
+            isDeleted: true,
+            withdrawnAt: now,
+            deletedAt: now,
+            email: null,
+            displayName: null,
+            photoUrl: null,
+            role: "withdrawn",
+            profileSetupCompleted: false,
+            identity: {
+              status: "withdrawn",
+              verifiedAt: null,
+              provider: null,
+              verifiedNameHash: null,
+              verifiedNameMasked: null,
+              failureCount: 0,
+              lockedUntil: null,
+            },
+            business: {
+              status: "withdrawn",
+              businessNumberHash: null,
+              businessNumberMasked: null,
+              representativeNameHash: null,
+              representativeNameMasked: null,
+              openedAt: null,
+              verifiedAt: null,
+              failureCount: 0,
+              lockedUntil: null,
+              ownershipSlot: null,
+              lastFailureReason: null,
+              lastCheckedAt: null,
+            },
+            storeProfile: {
+              nickname: "탈퇴사용자",
+              nicknameKey: null,
+              industry: null,
+              region: null,
+              createdAt:
+                userData.storeProfile && userData.storeProfile.createdAt
+                  ? userData.storeProfile.createdAt
+                  : null,
+              updatedAt: now,
+            },
+            notificationConsent: {
+              pushAgreed: false,
+              pushAgreedAt: null,
+              pushVersion: null,
+              updatedAt: now,
+            },
+            updatedAt: now,
+          },
+          {
+            merge: true,
+          }
+        );
+
+        transaction.delete(
+          db.collection("auth_links").doc(resolved.firebaseUid)
+        );
+      });
+
+      const anonymized = await anonymizeWithdrawnUserCommunityContent({
+        userId: resolved.userId,
+        now,
+      });
+
+      anonymizedPosts = anonymized.posts;
+      anonymizedComments = anonymized.comments;
+
+      try {
+        await admin.auth().deleteUser(authDeleteTargetUid);
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : "";
+
+        if (code !== "auth/user-not-found") {
+          throw error;
+        }
+      }
+
+      logger.info("Account withdrawn", {
+        firebaseUid: resolved.firebaseUid,
+        internalUserId: resolved.userId,
+        provider: resolvedProvider,
+        anonymizedPosts,
+        anonymizedComments,
+      });
+
+      return {
+        ok: true,
+        userId: resolved.userId,
+        firebaseUid: resolved.firebaseUid,
+        status: "withdrawn",
+        anonymizedPosts,
+        anonymizedComments,
+      };
+    } catch (error) {
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+
+      logger.error("Delete account failed", {
+        firebaseUid: resolved.firebaseUid,
+        internalUserId: resolved.userId,
+        anonymizedPosts,
+        anonymizedComments,
+        error,
+      });
+
+      throw new HttpsError("internal", "Delete account failed.");
+    }
+  }
+);
+
+
+exports.incrementPostViewOnServer = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 10,
+    memory: "256MiB",
+    maxInstances: 20,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const postId = normalizeString(request.data && request.data.postId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "postId is required.");
+    }
+
+    const userSnapshot = await resolved.userRef.get();
+
+    if (!userSnapshot.exists) {
+      throw new HttpsError("not-found", "User document does not exist.");
+    }
+
+    const userData = userSnapshot.data() || {};
+    validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+    if (userData.profileSetupCompleted !== true) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Profile setup must be completed first."
+      );
+    }
+
+    if (
+      normalizeString(userData.status) === "withdrawn" ||
+      userData.isDeleted === true
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Account already withdrawn."
+      );
+    }
+
+    const postRef = db.collection("posts").doc(postId);
+
+    await db.runTransaction(async (transaction) => {
+      const postSnapshot = await transaction.get(postRef);
+
+      if (!postSnapshot.exists) {
+        throw new HttpsError("not-found", "Post document does not exist.");
+      }
+
+      const postData = postSnapshot.data() || {};
+
+      if (
+        normalizeString(postData.status) !== "active" ||
+        postData.deletedAt !== null ||
+        postData.isHiddenByAdmin === true ||
+        postData.isReportThresholdReached === true ||
+        postData.adminRemovedAt !== null
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Post is not readable."
+        );
+      }
+
+      transaction.update(postRef, {
+        viewCount: admin.firestore.FieldValue.increment(1),
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+    };
+  }
+);
+exports.togglePostLikeOnServer = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 10,
+    memory: "256MiB",
+    maxInstances: 20,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const postId = normalizeString(request.data && request.data.postId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "postId is required.");
+    }
+
+    await assertCallableUserReady(resolved);
+
+    const postRef = db.collection("posts").doc(postId);
+    const likeId = `${postId}_${resolved.userId}`;
+    const likeRef = db.collection("post_likes").doc(likeId);
+
+    let liked = false;
+    let likeCount = 0;
+
+    await db.runTransaction(async (transaction) => {
+      const postSnapshot = await transaction.get(postRef);
+
+      if (!postSnapshot.exists) {
+        throw new HttpsError("not-found", "Post document does not exist.");
+      }
+
+      const postData = postSnapshot.data() || {};
+
+      if (!isReadablePostData(postData)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Post is not available for like."
+        );
+      }
+
+      const likeSnapshot = await transaction.get(likeRef);
+
+      const previousLikedUserIds = Array.isArray(postData.likedUserIds)
+        ? postData.likedUserIds
+            .map((item) => normalizeString(item))
+            .filter((item) => item)
+        : [];
+
+      const nextLikedUserIdsSet = new Set(previousLikedUserIds);
+      const currentlyLiked =
+        likeSnapshot.exists || nextLikedUserIdsSet.has(resolved.userId);
+
+      if (currentlyLiked) {
+        transaction.delete(likeRef);
+        nextLikedUserIdsSet.delete(resolved.userId);
+        liked = false;
+      } else {
+        transaction.set(likeRef, {
+          id: likeId,
+          postId,
+          userId: resolved.userId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        nextLikedUserIdsSet.add(resolved.userId);
+        liked = true;
+      }
+
+      const nextLikedUserIds = Array.from(nextLikedUserIdsSet);
+      likeCount = nextLikedUserIds.length;
+
+      transaction.update(postRef, {
+        likedUserIds: nextLikedUserIds,
+        likeCount,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      liked,
+      likeCount,
+    };
+  }
+);
+
+exports.toggleCommentLikeOnServer = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 10,
+    memory: "256MiB",
+    maxInstances: 20,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const postId = normalizeString(request.data && request.data.postId);
+    const commentId = normalizeString(request.data && request.data.commentId);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "postId is required.");
+    }
+
+    if (!commentId) {
+      throw new HttpsError("invalid-argument", "commentId is required.");
+    }
+
+    await assertCallableUserReady(resolved);
+
+    const commentRef = db.collection("comments").doc(commentId);
+    const likeId = `${commentId}_${resolved.userId}`;
+    const likeRef = db.collection("comment_likes").doc(likeId);
+
+    let liked = false;
+    let likeCount = 0;
+
+    await db.runTransaction(async (transaction) => {
+      const commentSnapshot = await transaction.get(commentRef);
+
+      if (!commentSnapshot.exists) {
+        throw new HttpsError("not-found", "Comment document does not exist.");
+      }
+
+      const commentData = commentSnapshot.data() || {};
+      const commentPostId = normalizeString(commentData.postId);
+
+      if (commentPostId !== postId) {
+        throw new HttpsError("not-found", "Comment does not belong to post.");
+      }
+
+      if (!isReadableCommentData(commentData)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Comment is not available for like."
+        );
+      }
+
+      const likeSnapshot = await transaction.get(likeRef);
+
+      const previousLikedUserIds = Array.isArray(commentData.likedUserIds)
+        ? commentData.likedUserIds
+            .map((item) => normalizeString(item))
+            .filter((item) => item)
+        : [];
+
+      const nextLikedUserIdsSet = new Set(previousLikedUserIds);
+      const currentlyLiked =
+        likeSnapshot.exists || nextLikedUserIdsSet.has(resolved.userId);
+
+      if (currentlyLiked) {
+        transaction.delete(likeRef);
+        nextLikedUserIdsSet.delete(resolved.userId);
+        liked = false;
+      } else {
+        transaction.set(likeRef, {
+          id: likeId,
+          postId,
+          commentId,
+          userId: resolved.userId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        nextLikedUserIdsSet.add(resolved.userId);
+        liked = true;
+      }
+
+      const nextLikedUserIds = Array.from(nextLikedUserIdsSet);
+      likeCount = nextLikedUserIds.length;
+
+      transaction.update(commentRef, {
+        likedUserIds: nextLikedUserIds,
+        likeCount,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    return {
+      ok: true,
+      postId,
+      commentId,
+      liked,
+      likeCount,
+    };
+  }
+);
+exports.addCommentOnServer = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 10,
+    memory: "256MiB",
+    maxInstances: 20,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const postId = normalizeString(request.data && request.data.postId);
+    const text = normalizeCommentText(request.data && request.data.text);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "postId is required.");
+    }
+
+    if (!text) {
+      throw new HttpsError("invalid-argument", "Comment text is required.");
+    }
+
+    await assertCallableUserReady(resolved);
+
+    const userSnapshot = await resolved.userRef.get();
+
+    if (!userSnapshot.exists) {
+      throw new HttpsError("not-found", "User document does not exist.");
+    }
+
+    const userData = userSnapshot.data() || {};
+    validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+    const author = buildCommunityAuthorSnapshot({
+      userId: resolved.userId,
+      userData,
+    });
+
+    const postRef = db.collection("posts").doc(postId);
+    const commentRef = db.collection("comments").doc();
+    const nowIso = new Date().toISOString();
+
+    let createdComment = null;
+
+    await db.runTransaction(async (transaction) => {
+      const postSnapshot = await transaction.get(postRef);
+
+      if (!postSnapshot.exists) {
+        throw new HttpsError("not-found", "Post document does not exist.");
+      }
+
+      const postData = postSnapshot.data() || {};
+
+      if (!isReadablePostData(postData)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Post is not available for comment."
+        );
+      }
+
+      const comment = buildServerCommentData({
+        commentId: commentRef.id,
+        postId,
+        parentId: null,
+        author,
+        text,
+        nowIso,
+      });
+
+      transaction.set(commentRef, comment);
+
+      transaction.update(postRef, {
+        commentCount: admin.firestore.FieldValue.increment(1),
+        updatedAt: nowIso,
+      });
+
+      createdComment = comment;
+    });
+
+    return {
+      ok: true,
+      postId,
+      commentId: commentRef.id,
+      comment: createdComment,
+    };
+  }
+);
+
+exports.addReplyOnServer = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 10,
+    memory: "256MiB",
+    maxInstances: 20,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const postId = normalizeString(request.data && request.data.postId);
+    const parentCommentId = normalizeString(
+      request.data && request.data.parentCommentId
+    );
+    const text = normalizeCommentText(request.data && request.data.text);
+
+    if (!postId) {
+      throw new HttpsError("invalid-argument", "postId is required.");
+    }
+
+    if (!parentCommentId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "parentCommentId is required."
+      );
+    }
+
+    if (!text) {
+      throw new HttpsError("invalid-argument", "Reply text is required.");
+    }
+
+    await assertCallableUserReady(resolved);
+
+    const userSnapshot = await resolved.userRef.get();
+
+    if (!userSnapshot.exists) {
+      throw new HttpsError("not-found", "User document does not exist.");
+    }
+
+    const userData = userSnapshot.data() || {};
+    validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+    const author = buildCommunityAuthorSnapshot({
+      userId: resolved.userId,
+      userData,
+    });
+
+    const postRef = db.collection("posts").doc(postId);
+    const parentCommentRef = db.collection("comments").doc(parentCommentId);
+    const commentRef = db.collection("comments").doc();
+    const nowIso = new Date().toISOString();
+
+    let createdComment = null;
+
+    await db.runTransaction(async (transaction) => {
+      const postSnapshot = await transaction.get(postRef);
+
+      if (!postSnapshot.exists) {
+        throw new HttpsError("not-found", "Post document does not exist.");
+      }
+
+      const postData = postSnapshot.data() || {};
+
+      if (!isReadablePostData(postData)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Post is not available for reply."
+        );
+      }
+
+      const parentSnapshot = await transaction.get(parentCommentRef);
+
+      if (!parentSnapshot.exists) {
+        throw new HttpsError("not-found", "Parent comment does not exist.");
+      }
+
+      const parentData = parentSnapshot.data() || {};
+      const parentPostId = normalizeString(parentData.postId);
+
+      if (parentPostId !== postId) {
+        throw new HttpsError(
+          "not-found",
+          "Parent comment does not belong to post."
+        );
+      }
+
+      if (!isReadableCommentData(parentData)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Parent comment is not available for reply."
+        );
+      }
+
+      const comment = buildServerCommentData({
+        commentId: commentRef.id,
+        postId,
+        parentId: parentCommentId,
+        author,
+        text,
+        nowIso,
+      });
+
+      transaction.set(commentRef, comment);
+
+      transaction.update(postRef, {
+        commentCount: admin.firestore.FieldValue.increment(1),
+        updatedAt: nowIso,
+      });
+
+      createdComment = comment;
+    });
+
+    return {
+      ok: true,
+      postId,
+      parentCommentId,
+      commentId: commentRef.id,
+      comment: createdComment,
+    };
+  }
+);
+exports.verifyBusinessOnServer = onCall(
+  {
+    region: "asia-northeast3",
+    timeoutSeconds: 20,
+    memory: "256MiB",
+    maxInstances: 10,
+    invoker: "public",
+    secrets: [NTS_BUSINESS_SERVICE_KEY],
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    const data = request.data || {};
+    const businessNumber = normalizeBusinessNumber(data.businessNumber);
+    const representativeName = normalizePersonName(data.representativeName);
+    const openedAt = normalizeOpenedAt(data.openedAt);
+
+    if (!businessNumber) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Business number must be 10 digits."
+      );
+    }
+
+    if (!representativeName) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Representative name is required."
+      );
+    }
+
+    if (!openedAt) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Opened date must be YYYYMMDD."
+      );
+    }
+
+    if (!isValidBusinessNumberChecksum(businessNumber)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Business number format is invalid."
+      );
+    }
+
+    const userSnapshotBefore = await resolved.userRef.get();
+
+    if (!userSnapshotBefore.exists) {
+      throw new HttpsError("not-found", "User document does not exist.");
+    }
+
+    const userDataBefore = userSnapshotBefore.data() || {};
+    validateUserBelongsToFirebaseUid(userDataBefore, resolved.firebaseUid);
+
+    if (userDataBefore.profileSetupCompleted !== true) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Profile setup must be completed first."
+      );
+    }
+
+    if (
+      normalizeString(userDataBefore.status) === "withdrawn" ||
+      userDataBefore.isDeleted === true
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Account already withdrawn."
+      );
+    }
+
+    const verificationResult = await verifyBusinessWithNts({
+      businessNumber,
+      representativeName,
+      openedAt,
+    });
+
+    if (!verificationResult.valid) {
+      await db.runTransaction(async (transaction) => {
+        const userSnapshot = await transaction.get(resolved.userRef);
+
+        if (!userSnapshot.exists) {
+          throw new HttpsError("not-found", "User document does not exist.");
+        }
+
+        const userData = userSnapshot.data() || {};
+        validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+        const currentBusiness = userData.business || {};
+        const failureCount =
+          typeof currentBusiness.failureCount === "number" &&
+          Number.isFinite(currentBusiness.failureCount)
+            ? currentBusiness.failureCount + 1
+            : 1;
+
+        transaction.set(
+          resolved.userRef,
+          {
+            role: "user",
+            business: {
+              status: "failed",
+              businessNumberHash: sha256Hex(businessNumber),
+              businessNumberMasked: maskBusinessNumber(businessNumber),
+              representativeNameHash: sha256Hex(representativeName),
+              representativeNameMasked: maskPersonName(representativeName),
+              openedAt,
+              verifiedAt: null,
+              failureCount,
+              lockedUntil: null,
+              ownershipSlot: null,
+              lastFailureReason: verificationResult.reason || "not_matched",
+              lastCheckedAt: now,
+              ntsStatusCode: verificationResult.statusCode || null,
+              ntsStatusMessage: verificationResult.statusMessage || null,
+              ntsTaxType: verificationResult.taxType || null,
+            },
+            updatedAt: now,
+          },
+          {
+            merge: true,
+          }
+        );
+      });
+
+      throw new HttpsError(
+        "failed-precondition",
+        verificationResult.message || "Business verification failed."
+      );
+    }
+
+    await db.runTransaction(async (transaction) => {
+      const userSnapshot = await transaction.get(resolved.userRef);
+
+      if (!userSnapshot.exists) {
+        throw new HttpsError("not-found", "User document does not exist.");
+      }
+
+      const userData = userSnapshot.data() || {};
+      validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+      if (userData.profileSetupCompleted !== true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Profile setup must be completed first."
+        );
+      }
+
+      if (
+        normalizeString(userData.status) === "withdrawn" ||
+        userData.isDeleted === true
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Account already withdrawn."
+        );
+      }
+
+      const business = userData.business || {};
+      const previousOwnershipSlot =
+        typeof business.ownershipSlot === "number" &&
+        Number.isFinite(business.ownershipSlot)
+          ? business.ownershipSlot
+          : 1;
+
+      transaction.set(
+        resolved.userRef,
+        {
+          role: "owner",
+          business: {
+            status: "verified",
+            businessNumberHash: sha256Hex(businessNumber),
+            businessNumberMasked: maskBusinessNumber(businessNumber),
+            representativeNameHash: sha256Hex(representativeName),
+            representativeNameMasked: maskPersonName(representativeName),
+            openedAt,
+            verifiedAt: now,
+            failureCount: 0,
+            lockedUntil: null,
+            ownershipSlot: previousOwnershipSlot,
+            ntsStatusCode: verificationResult.statusCode || null,
+            ntsStatusMessage: verificationResult.statusMessage || null,
+            ntsTaxType: verificationResult.taxType || null,
+            lastFailureReason: null,
+            lastCheckedAt: now,
+          },
+          updatedAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+    });
+
+    const userSnapshot = await resolved.userRef.get();
+    const userData = userSnapshot.data() || {};
+
+    logger.info("Business verified by NTS API without identity precheck", {
+      firebaseUid: resolved.firebaseUid,
+      internalUserId: resolved.userId,
+      businessNumberMasked: maskBusinessNumber(businessNumber),
+      representativeNameMasked: maskPersonName(representativeName),
+      ntsStatusCode: verificationResult.statusCode || null,
+    });
+
+    return buildAppUserResponse(userData, {
+      fallbackUserId: resolved.userId,
+      fallbackFirebaseUid: resolved.firebaseUid,
+      fallbackProvider: "firebase",
+    });
+  }
+);
+async function anonymizeWithdrawnUserCommunityContent({
+  userId,
+  now,
+}) {
+  const safeUserId = normalizeString(userId);
+
+  if (!safeUserId) {
+    return {
+      posts: 0,
+      comments: 0,
+    };
+  }
+
+  const posts = await anonymizeWithdrawnUserAuthorFields({
+    collectionName: "posts",
+    userId: safeUserId,
+    now,
+  });
+
+  const comments = await anonymizeWithdrawnUserAuthorFields({
+    collectionName: "comments",
+    userId: safeUserId,
+    now,
+  });
+
+  return {
+    posts,
+    comments,
+  };
+}
+
+async function anonymizeWithdrawnUserAuthorFields({
+  collectionName,
+  userId,
+  now,
+}) {
+  const safeCollectionName = normalizeString(collectionName);
+  const safeUserId = normalizeString(userId);
+
+  if (!safeCollectionName || !safeUserId) {
+    return 0;
+  }
+
+  let total = 0;
+  let lastDocument = null;
+  const pageSize = 400;
+
+  while (true) {
+    let query = db
+      .collection(safeCollectionName)
+      .where("authorId", "==", safeUserId)
+      .orderBy(admin.firestore.FieldPath.documentId())
+      .limit(pageSize);
+
+    if (lastDocument) {
+      query = query.startAfter(lastDocument);
+    }
+
+    const snapshot = await query.get();
+
+    if (snapshot.empty) {
+      break;
+    }
+
+    const batch = db.batch();
+
+    snapshot.docs.forEach((documentSnapshot) => {
+      batch.set(
+        documentSnapshot.ref,
+        {
+          authorLabel: "탈퇴사용자",
+          isOwnerVerified: false,
+          industryId: null,
+          locationLabel: null,
+          updatedAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+    });
+
+    await batch.commit();
+
+    total += snapshot.size;
+    lastDocument = snapshot.docs[snapshot.docs.length - 1];
+
+    if (snapshot.size < pageSize) {
+      break;
+    }
+  }
+
+  return total;
+}
+
+async function fetchKakaoUser(accessToken) {
+  try {
+    const response = await axios.get(KAKAO_USER_ME_URL, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+      },
+      timeout: 10000,
+    });
+
+    return response.data;
+  } catch (error) {
+    const status = error && error.response ? error.response.status : null;
+    const data = error && error.response ? error.response.data : null;
+
+    logger.warn("Kakao user lookup failed", {
+      status,
+      data,
+    });
+
+    throw new HttpsError(
+      "unauthenticated",
+      "Kakao accessToken verification failed."
+    );
+  }
+}
+
+async function verifyBusinessWithNts({
+  businessNumber,
+  representativeName,
+  openedAt,
+}) {
+  const serviceKey = normalizeString(NTS_BUSINESS_SERVICE_KEY.value());
+
+  if (!serviceKey) {
+    throw new HttpsError(
+      "failed-precondition",
+      "NTS service key is not configured."
+    );
+  }
+
+  try {
+    const response = await axios.post(
+      `${NTS_BUSINESS_VALIDATE_URL}?serviceKey=${encodeURIComponent(
+        serviceKey
+      )}`,
+      {
+        businesses: [
+          {
+            b_no: businessNumber,
+            start_dt: openedAt,
+            p_nm: representativeName,
+            p_nm2: "",
+            b_nm: "",
+            corp_no: "",
+            b_sector: "",
+            b_type: "",
+          },
+        ],
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        timeout: 12000,
+      }
+    );
+
+    const body = response.data || {};
+    const dataList = Array.isArray(body.data) ? body.data : [];
+    const first = dataList.length > 0 ? dataList[0] || {} : {};
+
+    const valid = normalizeString(first.valid);
+    const validMsg = normalizeString(first.valid_msg);
+    const status =
+      first.status && typeof first.status === "object" ? first.status : {};
+
+    const statusCode = normalizeString(status.b_stt_cd);
+    const statusMessage = normalizeString(status.b_stt);
+    const taxType = normalizeString(status.tax_type);
+
+    if (valid === "01") {
+      return {
+        valid: true,
+        statusCode,
+        statusMessage,
+        taxType,
+      };
+    }
+
+    return {
+      valid: false,
+      reason: valid || "not_matched",
+      message:
+        validMsg || "Business information does not match.",
+      statusCode,
+      statusMessage,
+      taxType,
+    };
+  } catch (error) {
+    const status = error && error.response ? error.response.status : null;
+    const data = error && error.response ? error.response.data : null;
+
+    logger.warn("NTS business verification failed", {
+      status,
+      data,
+    });
+
+    throw new HttpsError("unavailable", "Business verification service is temporarily unavailable. Please try again later.");
+  }
+}
+
+async function ensureUserProfile({
+  firebaseUid,
+  provider,
+  email,
+  displayName,
+  photoUrl,
+}) {
+  const safeFirebaseUid = normalizeString(firebaseUid);
+  const safeProvider = normalizeProvider(provider) || "firebase";
+  const safeEmail = normalizeString(email) || null;
+  const safeDisplayName = normalizeString(displayName) || null;
+  const safePhotoUrl = normalizeString(photoUrl) || null;
+
+  if (!safeFirebaseUid) {
+    throw new HttpsError("invalid-argument", "firebaseUid is required.");
+  }
+
+  const linkRef = db.collection("auth_links").doc(safeFirebaseUid);
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  let resolvedUserId = "";
+
+  await db.runTransaction(async (transaction) => {
+    const linkSnapshot = await transaction.get(linkRef);
+
+    if (linkSnapshot.exists) {
+      const linkData = linkSnapshot.data() || {};
+      const existingUserId = normalizeString(linkData.userId);
+
+      if (!existingUserId) {
+        throw new HttpsError(
+          "data-loss",
+          "auth_links document exists but userId is empty."
+        );
+      }
+
+      resolvedUserId = existingUserId;
+
+      const userRef = db.collection("users").doc(existingUserId);
+      const userSnapshot = await transaction.get(userRef);
+      const userData = userSnapshot.exists ? userSnapshot.data() || {} : {};
+
+      if (
+        normalizeString(userData.status) === "withdrawn" ||
+        userData.isDeleted === true
+      ) {
+        transaction.delete(linkRef);
+
+        const newUserId = createInternalUserId();
+        resolvedUserId = newUserId;
+
+        const newUserRef = db.collection("users").doc(newUserId);
+
+        transaction.set(linkRef, {
+          firebaseUid: safeFirebaseUid,
+          userId: newUserId,
+          provider: safeProvider,
+          createdAt: now,
+          updatedAt: now,
+          lastLoginAt: now,
+        });
+
+        transaction.set(
+          newUserRef,
+          removeUndefinedFields({
+            userId: newUserId,
+            firebaseUid: safeFirebaseUid,
+            provider: safeProvider,
+            email: safeEmail,
+            displayName: safeDisplayName,
+            photoUrl: safePhotoUrl,
+            role: "user",
+            identity: {
+              status: "none",
+              verifiedAt: null,
+              provider: null,
+              verifiedNameHash: null,
+              verifiedNameMasked: null,
+              failureCount: 0,
+              lockedUntil: null,
+            },
+            business: {
+              status: "none",
+              businessNumberHash: null,
+              businessNumberMasked: null,
+              representativeNameHash: null,
+              representativeNameMasked: null,
+              openedAt: null,
+              verifiedAt: null,
+              failureCount: 0,
+              lockedUntil: null,
+              ownershipSlot: null,
+              lastFailureReason: null,
+              lastCheckedAt: null,
+            },
+            profileSetupCompleted: false,
+            terms: {
+              agreed: false,
+              agreedAt: null,
+              version: null,
+            },
+            notificationConsent: {
+              pushAgreed: false,
+              pushAgreedAt: null,
+              pushVersion: null,
+              updatedAt: null,
+            },
+            storeProfile: {
+              nickname: null,
+              nicknameKey: null,
+              industry: null,
+              region: null,
+              createdAt: null,
+              updatedAt: null,
+            },
+            createdAt: now,
+            updatedAt: now,
+            lastLoginAt: now,
+            status: "active",
+            isDeleted: false,
+            sanctionStatus: "normal",
+          })
+        );
+
+        return;
+      }
+
+      transaction.set(
+        linkRef,
+        {
+          firebaseUid: safeFirebaseUid,
+          userId: existingUserId,
+          provider: safeProvider,
+          updatedAt: now,
+          lastLoginAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+
+      transaction.set(
+        userRef,
+        removeUndefinedFields({
+          userId: existingUserId,
+          firebaseUid: safeFirebaseUid,
+          provider: safeProvider,
+          email: safeEmail,
+          displayName: safeDisplayName,
+          photoUrl: safePhotoUrl,
+          role: normalizeString(userData.role) || "user",
+          identity: normalizeIdentity(userData.identity),
+          business: normalizeBusiness(userData.business),
+          profileSetupCompleted:
+            typeof userData.profileSetupCompleted === "boolean"
+              ? userData.profileSetupCompleted
+              : false,
+          terms: normalizeTerms(userData.terms),
+          notificationConsent: normalizeNotificationConsent(
+            userData.notificationConsent
+          ),
+          storeProfile: normalizeStoreProfile(userData.storeProfile),
+          status: normalizeString(userData.status) || "active",
+          isDeleted:
+            typeof userData.isDeleted === "boolean" ? userData.isDeleted : false,
+          sanctionStatus:
+            normalizeString(userData.sanctionStatus) || "normal",
+          updatedAt: now,
+          lastLoginAt: now,
+        }),
+        {
+          merge: true,
+        }
+      );
+
+      return;
+    }
+
+    const newUserId = createInternalUserId();
+    resolvedUserId = newUserId;
+
+    const userRef = db.collection("users").doc(newUserId);
+
+    transaction.set(linkRef, {
+      firebaseUid: safeFirebaseUid,
+      userId: newUserId,
+      provider: safeProvider,
+      createdAt: now,
+      updatedAt: now,
+      lastLoginAt: now,
+    });
+
+    transaction.set(
+      userRef,
+      removeUndefinedFields({
+        userId: newUserId,
+        firebaseUid: safeFirebaseUid,
+        provider: safeProvider,
+        email: safeEmail,
+        displayName: safeDisplayName,
+        photoUrl: safePhotoUrl,
+        role: "user",
+        identity: {
+          status: "none",
+          verifiedAt: null,
+          provider: null,
+          verifiedNameHash: null,
+          verifiedNameMasked: null,
+          failureCount: 0,
+          lockedUntil: null,
+        },
+        business: {
+          status: "none",
+          businessNumberHash: null,
+          businessNumberMasked: null,
+          representativeNameHash: null,
+          representativeNameMasked: null,
+          openedAt: null,
+          verifiedAt: null,
+          failureCount: 0,
+          lockedUntil: null,
+          ownershipSlot: null,
+          lastFailureReason: null,
+          lastCheckedAt: null,
+        },
+        profileSetupCompleted: false,
+        terms: {
+          agreed: false,
+          agreedAt: null,
+          version: null,
+        },
+        notificationConsent: {
+          pushAgreed: false,
+          pushAgreedAt: null,
+          pushVersion: null,
+          updatedAt: null,
+        },
+        storeProfile: {
+          nickname: null,
+          nicknameKey: null,
+          industry: null,
+          region: null,
+          createdAt: null,
+          updatedAt: null,
+        },
+        createdAt: now,
+        updatedAt: now,
+        lastLoginAt: now,
+        status: "active",
+        isDeleted: false,
+        sanctionStatus: "normal",
+      })
+    );
+  });
+
+  if (!resolvedUserId) {
+    throw new HttpsError("internal", "Failed to resolve internal userId.");
+  }
+
+  const userSnapshot = await db.collection("users").doc(resolvedUserId).get();
+  const userData = userSnapshot.data() || {};
+  const identity = userData.identity || {};
+  const business = userData.business || {};
+  const terms = userData.terms || {};
+  const storeProfile = userData.storeProfile || {};
+
+  return {
+    userId: normalizeString(userData.userId) || resolvedUserId,
+    firebaseUid: normalizeString(userData.firebaseUid) || safeFirebaseUid,
+    provider: normalizeProvider(userData.provider) || safeProvider,
+    role: normalizeString(userData.role) || "user",
+    identityStatus: normalizeString(identity.status) || "none",
+    businessStatus: normalizeString(business.status) || "none",
+    profileSetupCompleted: userData.profileSetupCompleted === true,
+    termsAgreed: terms.agreed === true,
+    nickname: normalizeString(storeProfile.nickname),
+    industry: normalizeString(storeProfile.industry),
+    region: normalizeString(storeProfile.region),
+  };
+}
+
+async function resolveCurrentUserForCallable(request) {
+  if (!request.auth || !request.auth.uid) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Firebase authentication is required."
+    );
+  }
+
+  const firebaseUid = request.auth.uid;
+  const linkRef = db.collection("auth_links").doc(firebaseUid);
+  const linkSnapshot = await linkRef.get();
+
+  if (!linkSnapshot.exists) {
+    throw new HttpsError("not-found", "Auth link document does not exist.");
+  }
+
+  const linkData = linkSnapshot.data() || {};
+  const userId = normalizeString(linkData.userId);
+
+  if (!userId) {
+    throw new HttpsError(
+      "data-loss",
+      "auth_links document exists but userId is empty."
+    );
+  }
+
+  return {
+    firebaseUid,
+    userId,
+    userRef: db.collection("users").doc(userId),
+  };
+}
+
+async function assertCallableUserReady(resolved) {
+  const userSnapshot = await resolved.userRef.get();
+
+  if (!userSnapshot.exists) {
+    throw new HttpsError("not-found", "User document does not exist.");
+  }
+
+  const userData = userSnapshot.data() || {};
+  validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+  if (userData.profileSetupCompleted !== true) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Profile setup must be completed first."
+    );
+  }
+
+  if (
+    normalizeString(userData.status) === "withdrawn" ||
+    userData.isDeleted === true
+  ) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Account already withdrawn."
+    );
+  }
+}
+
+function isReadablePostData(postData) {
+  return normalizeString(postData.status) === "active"
+    && postData.deletedAt === null
+    && postData.isHiddenByAdmin === false
+    && postData.isReportThresholdReached === false
+    && postData.adminRemovedAt === null;
+}
+
+function isReadableCommentData(commentData) {
+  return normalizeString(commentData.status) === "active"
+    && commentData.isDeleted === false
+    && commentData.deletedAt === null
+    && commentData.isHiddenByAdmin === false
+    && commentData.isReportThresholdReached === false
+    && commentData.adminRemovedAt === null;
+}
+function normalizeCommentText(value) {
+  const text = normalizeString(value);
+
+  if (!text) {
+    return "";
+  }
+
+  if (text.length > 500) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Comment text must be 500 characters or less."
+    );
+  }
+
+  return text;
+}
+
+function buildCommunityAuthorSnapshot({
+  userId,
+  userData,
+}) {
+  const storeProfile =
+    userData && typeof userData.storeProfile === "object"
+      ? userData.storeProfile
+      : {};
+
+  const business =
+    userData && typeof userData.business === "object"
+      ? userData.business
+      : {};
+
+  const authorLabel = normalizeString(storeProfile.nickname);
+  const industryId = normalizeString(storeProfile.industry) || null;
+  const locationLabel = normalizeString(storeProfile.region) || null;
+  const isOwnerVerified = normalizeString(business.status) === "verified";
+
+  if (!authorLabel) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Profile setup must be completed first."
+    );
+  }
+
+  return {
+    authorId: userId,
+    authorLabel,
+    isOwnerVerified,
+    industryId,
+    locationLabel,
+  };
+}
+
+function buildServerCommentData({
+  commentId,
+  postId,
+  parentId,
+  author,
+  text,
+  nowIso,
+}) {
+  return {
+    id: commentId,
+    postId,
+    authorId: author.authorId,
+    authorLabel: author.authorLabel,
+    isOwnerVerified: author.isOwnerVerified,
+    industryId: author.industryId,
+    locationLabel: author.locationLabel,
+    text,
+    parentId,
+    likeCount: 0,
+    likedUserIds: [],
+    reportCount: 0,
+    reportedUserIds: [],
+    reportReasons: [],
+    reportReasonCounts: {},
+    isReportThresholdReached: false,
+    isHiddenByAdmin: false,
+    adminHiddenReason: null,
+    adminHiddenAt: null,
+    adminRemovedAt: null,
+    adminRemovedReason: null,
+    isDeleted: false,
+    status: "active",
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    deletedAt: null,
+  };
+}
+function validateUserBelongsToFirebaseUid(userData, firebaseUid) {
+  const userFirebaseUid = normalizeString(userData.firebaseUid);
+
+  if (userFirebaseUid !== firebaseUid) {
+    throw new HttpsError(
+      "permission-denied",
+      "User document does not belong to current Firebase user."
+    );
+  }
+}
+
+function buildAppUserResponse(
+  userData,
+  { fallbackUserId, fallbackFirebaseUid, fallbackProvider }
+) {
+  const identity = userData.identity || {};
+  const business = userData.business || {};
+  const terms = userData.terms || {};
+  const storeProfile = userData.storeProfile || {};
+
+  return {
+    userId: normalizeString(userData.userId) || fallbackUserId || "",
+    firebaseUid:
+      normalizeString(userData.firebaseUid) || fallbackFirebaseUid || "",
+    provider:
+      normalizeProvider(userData.provider) || fallbackProvider || "firebase",
+    email: normalizeString(userData.email) || null,
+    displayName: normalizeString(userData.displayName) || null,
+    photoUrl: normalizeString(userData.photoUrl) || null,
+    role: normalizeString(userData.role) || "user",
+    identityStatus: normalizeString(identity.status) || "none",
+    businessStatus: normalizeString(business.status) || "none",
+    profileSetupCompleted: userData.profileSetupCompleted === true,
+    termsAgreed: terms.agreed === true,
+    nickname: normalizeString(storeProfile.nickname) || null,
+    industry: normalizeString(storeProfile.industry) || null,
+    region: normalizeString(storeProfile.region) || null,
+  };
+}
+
+function normalizeIdentity(value) {
+  const src = value && typeof value === "object" ? value : {};
+
+  return {
+    status: normalizeString(src.status) || "none",
+    verifiedAt: src.verifiedAt || null,
+    provider: normalizeString(src.provider) || null,
+    verifiedNameHash: normalizeString(src.verifiedNameHash) || null,
+    verifiedNameMasked: normalizeString(src.verifiedNameMasked) || null,
+    failureCount:
+      typeof src.failureCount === "number" && Number.isFinite(src.failureCount)
+        ? src.failureCount
+        : 0,
+    lockedUntil: src.lockedUntil || null,
+  };
+}
+
+function normalizeBusiness(value) {
+  const src = value && typeof value === "object" ? value : {};
+
+  return {
+    status: normalizeString(src.status) || "none",
+    businessNumberHash: normalizeString(src.businessNumberHash) || null,
+    businessNumberMasked: normalizeString(src.businessNumberMasked) || null,
+    representativeNameHash:
+      normalizeString(src.representativeNameHash) || null,
+    representativeNameMasked:
+      normalizeString(src.representativeNameMasked) || null,
+    openedAt: src.openedAt || null,
+    verifiedAt: src.verifiedAt || null,
+    failureCount:
+      typeof src.failureCount === "number" && Number.isFinite(src.failureCount)
+        ? src.failureCount
+        : 0,
+    lockedUntil: src.lockedUntil || null,
+    ownershipSlot:
+      typeof src.ownershipSlot === "number" && Number.isFinite(src.ownershipSlot)
+        ? src.ownershipSlot
+        : null,
+    lastFailureReason: normalizeString(src.lastFailureReason) || null,
+    lastCheckedAt: src.lastCheckedAt || null,
+  };
+}
+
+function normalizeTerms(value) {
+  const src = value && typeof value === "object" ? value : {};
+
+  return {
+    agreed: src.agreed === true,
+    agreedAt: src.agreedAt || null,
+    version: normalizeString(src.version) || null,
+  };
+}
+
+function normalizeNotificationConsent(value) {
+  const src = value && typeof value === "object" ? value : {};
+
+  return {
+    pushAgreed: src.pushAgreed === true,
+    pushAgreedAt: src.pushAgreedAt || null,
+    pushVersion: normalizeString(src.pushVersion) || null,
+    updatedAt: src.updatedAt || null,
+  };
+}
+
+function normalizeStoreProfile(value) {
+  const src = value && typeof value === "object" ? value : {};
+  const nickname = normalizeString(src.nickname) || null;
+  const nicknameKey =
+    normalizeString(src.nicknameKey) ||
+    createNicknameKeyForExistingValue(nickname);
+
+  return {
+    nickname,
+    nicknameKey: nicknameKey || null,
+    industry: normalizeString(src.industry) || null,
+    region: normalizeString(src.region) || null,
+    createdAt: src.createdAt || null,
+    updatedAt: src.updatedAt || null,
+  };
+}
+
+function normalizeNickname(value) {
+  const nickname = normalizeString(value).replace(/\s+/g, "");
+
+  if (!nickname) {
+    throw new HttpsError("invalid-argument", "Nickname is required.");
+  }
+
+  if (nickname.length < NICKNAME_MIN_LENGTH) {
+    throw new HttpsError(
+      "invalid-argument",
+      `Nickname must be at least ${NICKNAME_MIN_LENGTH} characters.`
+    );
+  }
+
+  if (nickname.length > NICKNAME_MAX_LENGTH) {
+    throw new HttpsError(
+      "invalid-argument",
+      `Nickname must be ${NICKNAME_MAX_LENGTH} characters or less.`
+    );
+  }
+
+  if (!/^[\uAC00-\uD7A3a-zA-Z0-9_]+$/.test(nickname)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Nickname format is invalid."
+    );
+  }
+
+  const nicknameKey = createNicknameKey(nickname);
+
+  if (RESERVED_NICKNAME_KEYS.has(nicknameKey)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Nickname is reserved."
+    );
+  }
+
+  for (const blocked of BLOCKED_NICKNAME_KEYWORDS) {
+    if (nicknameKey.includes(blocked)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Nickname contains blocked words."
+      );
+    }
+  }
+
+  return nickname;
+}
+
+function createNicknameKey(nickname) {
+  const key = normalizeString(nickname)
+    .replace(/\s+/g, "")
+    .toLowerCase();
+
+  if (!key) {
+    throw new HttpsError("invalid-argument", "Nickname is required.");
+  }
+
+  return key;
+}
+
+function createNicknameKeyForExistingValue(value) {
+  const key = normalizeString(value)
+    .replace(/\s+/g, "")
+    .toLowerCase();
+
+  if (!key) {
+    return "";
+  }
+  if (key === "탈퇴사용자") {
+    return "";
+  }
+
+  return key;
+}
+
+function assertNicknameAvailable({
+  nicknameSnapshot,
+  userId,
+}) {
+  if (!nicknameSnapshot.exists) {
+    return;
+  }
+
+  const data = nicknameSnapshot.data() || {};
+  const ownerUserId = normalizeString(data.userId);
+
+  if (ownerUserId === userId) {
+    return;
+  }
+
+  throw new HttpsError(
+    "already-exists",
+    "Nickname already exists."
+  );
+}
+
+function reserveNickname({
+  transaction,
+  nicknameRef,
+  userId,
+  firebaseUid,
+  nickname,
+  nicknameKey,
+  now,
+}) {
+  transaction.set(
+    nicknameRef,
+    {
+      userId,
+      firebaseUid,
+      nickname,
+      nicknameKey,
+      updatedAt: now,
+      createdAt: now,
+    },
+    {
+      merge: true,
+    }
+  );
+}
+
+function normalizeProfileText(value, fieldName, maxLength) {
+  const text = normalizeString(value);
+
+  if (!text) {
+    throw new HttpsError(
+      "invalid-argument",
+      `${fieldName} is required.`
+    );
+  }
+
+  if (text.length > maxLength) {
+    throw new HttpsError(
+      "invalid-argument",
+      `${fieldName} must be ${maxLength} characters or less.`
+    );
+  }
+
+  return text;
+}
+
+function normalizeKakaoId(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  return String(value).trim();
+}
+
+function normalizeBusinessNumber(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  const digits = String(value).replace(/\D/g, "").trim();
+
+  if (!/^\d{10}$/.test(digits)) {
+    return "";
+  }
+
+  return digits;
+}
+
+function normalizeOpenedAt(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  const digits = String(value).replace(/\D/g, "").trim();
+
+  if (!/^\d{8}$/.test(digits)) {
+    return "";
+  }
+
+  const year = Number(digits.slice(0, 4));
+  const month = Number(digits.slice(4, 6));
+  const day = Number(digits.slice(6, 8));
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day)
+  ) {
+    return "";
+  }
+
+  if (year < 1900 || year > 2100) {
+    return "";
+  }
+
+  if (month < 1 || month > 12) {
+    return "";
+  }
+
+  const lastDayOfMonth = new Date(year, month, 0).getDate();
+
+  if (day < 1 || day > lastDayOfMonth) {
+    return "";
+  }
+
+  const now = new Date();
+  const todayNumber =
+    now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+
+  const inputNumber = year * 10000 + month * 100 + day;
+
+  if (inputNumber > todayNumber) {
+    return "";
+  }
+
+  return digits;
+}
+
+function normalizePersonName(value) {
+  const text = normalizeString(value).replace(/\s+/g, "");
+
+  if (!text || text.length < 2 || text.length > 40) {
+    return "";
+  }
+
+  return text;
+}
+
+function normalizeString(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim();
+}
+
+function normalizeProvider(value) {
+  const text = normalizeString(value);
+
+  if (!text) {
+    return "";
+  }
+
+  if (text === "google.com") {
+    return "google";
+  }
+
+  if (text === "apple.com") {
+    return "apple";
+  }
+
+  if (text === "password") {
+    return "password";
+  }
+
+  if (text === "custom") {
+    return "custom";
+  }
+
+  if (text === "kakao") {
+    return "kakao";
+  }
+
+  if (text === "google" || text === "apple" || text === "firebase") {
+    return text;
+  }
+
+  return text;
+}
+
+function resolveProvider(signInProvider) {
+  const provider = normalizeProvider(signInProvider);
+
+  if (provider) {
+    return provider;
+  }
+
+  return "firebase";
+}
+
+function createInternalUserId() {
+  const millis = Date.now();
+  const random = crypto.randomBytes(6).toString("hex");
+  return `usr_${millis}_${random}`;
+}
+
+function isValidBusinessNumberChecksum(value) {
+  const digits = normalizeBusinessNumber(value);
+
+  if (!digits) {
+    return false;
+  }
+
+  const numbers = digits.split("").map((item) => Number(item));
+  const weights = [1, 3, 7, 1, 3, 7, 1, 3];
+
+  let sum = 0;
+
+  for (let i = 0; i < weights.length; i += 1) {
+    sum += numbers[i] * weights[i];
+  }
+
+  const ninth = numbers[8] * 5;
+  sum += Math.floor(ninth / 10);
+  sum += ninth % 10;
+
+  const check = (10 - (sum % 10)) % 10;
+
+  return check === numbers[9];
+}
+
+function maskBusinessNumber(value) {
+  const digits = normalizeBusinessNumber(value);
+
+  if (!digits) {
+    return null;
+  }
+
+  return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
+}
+
+function maskPersonName(value) {
+  const name = normalizePersonName(value);
+
+  if (!name) {
+    return null;
+  }
+
+  if (name.length === 2) {
+    return `${name.slice(0, 1)}*`;
+  }
+
+  return `${name.slice(0, 1)}${"*".repeat(name.length - 1)}`;
+}
+
+function sha256Hex(value) {
+  return crypto
+    .createHash("sha256")
+    .update(String(value || ""), "utf8")
+    .digest("hex");
+}
+
+function removeUndefinedFields(input) {
+  const output = {};
+
+  Object.keys(input).forEach((key) => {
+    const value = input[key];
+
+    if (value !== undefined) {
+      output[key] = value;
+    }
+  });
+
+  return output;
+}
+exports.acknowledgeLatestWarningOnServer =
+  community.acknowledgeLatestWarningOnServer;
+
+
+
+
+
+
+
+
+
+
+// END_OF_FILE: functions/index.js
+
+--- FILE NOT FOUND: functions/src/index.js ---
+
+--- FILE NOT FOUND: functions/src/index.ts ---
+
+--- FILE NOT FOUND: functions/lib/index.js ---
+
+================================================
+FILE_PATH: functions/src/harugyeol.js
+================================================
+const admin = require("firebase-admin");
+const { HttpsError, onCall } = require("firebase-functions/v2/https");
+const { logger } = require("firebase-functions");
+
+const db = admin.firestore();
+
+const HARUGYEOL_REGION = "asia-northeast3";
+
+const HARUGYEOL_VALID_MOODS = {
+  slow: 10,
+  normal: 45,
+  good: 75,
+  great: 100,
+};
+
+const HARUGYEOL_VALID_REASONS = new Set([
+  "economy",
+  "weekdayHoliday",
+  "delivery",
+  "localMood",
+  "event",
+  "groupGuest",
+  "rudeGuest",
+  "unexpectedGood",
+  "weather",
+  "etc",
+
+  // Backward compatibility for old local/server keys.
+  "weekday",
+  "deliveryDown",
+]);
+
+const HARUGYEOL_REASON_KEY_ALIASES = {
+  weekday: "weekdayHoliday",
+  deliveryDown: "delivery",
+};
+
+const HARUGYEOL_VALID_SLOTS = new Set(["midday", "evening"]);
+
+exports.submitHarugyeolEntry = onCall(
+  {
+    region: HARUGYEOL_REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: 20,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const data = request.data || {};
+
+    const dateKey = normalizeString(data.dateKey);
+    const slot = normalizeString(data.slot);
+    const mood = normalizeString(data.mood);
+    const oneLineText = normalizeString(data.oneLineText);
+    const reasons = parseHarugyeolReasons(data.reasons);
+
+    if (!dateKey) {
+      throw new HttpsError("invalid-argument", "dateKey required.");
+    }
+
+    if (!HARUGYEOL_VALID_SLOTS.has(slot)) {
+      throw new HttpsError("invalid-argument", "Invalid harugyeol slot.");
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(HARUGYEOL_VALID_MOODS, mood)) {
+      throw new HttpsError("invalid-argument", "Invalid harugyeol mood.");
+    }
+
+    if (oneLineText.length > 40) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Harugyeol oneLineText must be 40 characters or less."
+      );
+    }
+
+    const kst = getHarugyeolKstNowParts();
+
+    if (dateKey !== kst.dateKey) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Only today's harugyeol can be submitted."
+      );
+    }
+
+    if (!canSubmitHarugyeolSlot(slot, kst.minutes)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Harugyeol entry is not available for this slot at this time."
+      );
+    }
+
+    const score = HARUGYEOL_VALID_MOODS[mood];
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const nowIso = new Date().toISOString();
+
+    await db.runTransaction(async (transaction) => {
+      const userSnapshot = await transaction.get(resolved.userRef);
+
+      if (!userSnapshot.exists) {
+        throw new HttpsError("not-found", "User document does not exist.");
+      }
+
+      const userData = userSnapshot.data() || {};
+      validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+      if (userData.profileSetupCompleted !== true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Profile setup must be completed first."
+        );
+      }
+
+      if (
+        normalizeString(userData.status) !== "active" ||
+        userData.isDeleted === true
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Inactive account cannot submit harugyeol."
+        );
+      }
+
+      const storeProfile = userData.storeProfile || {};
+      const authorLabel = normalizeString(storeProfile.nickname) || "익명";
+      const industryId = normalizeString(storeProfile.industry) || null;
+      const locationLabel = normalizeString(storeProfile.region) || null;
+      const business = userData.business || {};
+      const isOwnerVerified = normalizeString(business.status) === "verified";
+
+      const entryId = `${resolved.userId}_${slot}`;
+
+      const dayRef = db.collection("harugyeolDays").doc(dateKey);
+      const entryRef = dayRef.collection("entries").doc(entryId);
+      const commentRef = oneLineText
+        ? dayRef.collection("comments").doc(entryId)
+        : null;
+
+      const entrySnapshot = await transaction.get(entryRef);
+
+      if (entrySnapshot.exists) {
+        throw new HttpsError(
+          "already-exists",
+          "Current slot harugyeol entry already exists."
+        );
+      }
+
+      const daySnapshot = await transaction.get(dayRef);
+      const currentDay = daySnapshot.exists ? daySnapshot.data() || {} : {};
+
+      const totalCount = toFiniteNumber(currentDay.totalCount) + 1;
+      const scoreSum = toFiniteNumber(currentDay.scoreSum) + score;
+      const averageScore = totalCount > 0 ? scoreSum / totalCount : 0;
+
+      const slotStats = normalizeHarugyeolSlotStats(currentDay.slotStats);
+      const currentSlotStat = slotStats[slot] || createEmptyHarugyeolSlotStat();
+
+      const nextSlotCount = toFiniteNumber(currentSlotStat.count) + 1;
+      const nextSlotScoreSum = toFiniteNumber(currentSlotStat.scoreSum) + score;
+
+      const nextSlotMoodCounts = normalizeHarugyeolMoodCounts(
+        currentSlotStat.moodCounts
+      );
+      nextSlotMoodCounts[mood] = toFiniteNumber(nextSlotMoodCounts[mood]) + 1;
+
+      const nextSlotReasonCounts = normalizeHarugyeolReasonCounts(
+        currentSlotStat.reasonCounts
+      );
+
+      reasons.forEach((reason) => {
+        nextSlotReasonCounts[reason] =
+          toFiniteNumber(nextSlotReasonCounts[reason]) + 1;
+      });
+
+      slotStats[slot] = {
+        count: nextSlotCount,
+        scoreSum: nextSlotScoreSum,
+        averageScore:
+          nextSlotCount > 0 ? nextSlotScoreSum / nextSlotCount : 0,
+        moodCounts: nextSlotMoodCounts,
+        reasonCounts: nextSlotReasonCounts,
+      };
+
+      const hourlyStats = normalizeHarugyeolHourlyStats(currentDay.hourlyStats);
+      const graphHour = resolveHarugyeolGraphHour({
+        slot,
+        hour: kst.hour,
+        minutes: kst.minutes,
+      });
+
+      if (graphHour !== null) {
+        const hourKey = String(graphHour).padStart(2, "0");
+        const hourlyStatKey = `${slot}_${hourKey}`;
+        const currentHourlyStat =
+          hourlyStats[hourlyStatKey] ||
+          createEmptyHarugyeolHourlyStat({
+            slot,
+            hour: graphHour,
+          });
+
+        const nextHourlyCount = toFiniteNumber(currentHourlyStat.count) + 1;
+        const nextHourlyScoreSum =
+          toFiniteNumber(currentHourlyStat.scoreSum) + score;
+
+        hourlyStats[hourlyStatKey] = {
+          hour: graphHour,
+          slot,
+          count: nextHourlyCount,
+          scoreSum: nextHourlyScoreSum,
+          averageScore:
+            nextHourlyCount > 0 ? nextHourlyScoreSum / nextHourlyCount : 0,
+        };
+      }
+
+      const moodCounts = normalizeHarugyeolMoodCounts(currentDay.moodCounts);
+      moodCounts[mood] = toFiniteNumber(moodCounts[mood]) + 1;
+
+      const reasonCounts = normalizeHarugyeolReasonCounts(
+        currentDay.reasonCounts
+      );
+
+      reasons.forEach((reason) => {
+        reasonCounts[reason] = toFiniteNumber(reasonCounts[reason]) + 1;
+      });
+
+      transaction.set(
+        dayRef,
+        {
+          dateKey,
+          totalCount,
+          scoreSum,
+          averageScore,
+          slotStats,
+          hourlyStats,
+          moodCounts,
+          reasonCounts,
+          createdAt: currentDay.createdAt || now,
+          updatedAt: now,
+        },
+        {
+          merge: true,
+        }
+      );
+
+      transaction.set(entryRef, {
+        id: entryId,
+        dateKey,
+        userId: resolved.userId,
+        authorLabel,
+        industryId,
+        locationLabel,
+        isOwnerVerified,
+        slot,
+        mood,
+        score,
+        reasons,
+        oneLineText,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      if (commentRef) {
+        transaction.set(commentRef, {
+          id: entryId,
+          dateKey,
+          entryId,
+          userId: resolved.userId,
+          authorLabel,
+          industryId,
+          locationLabel,
+          isOwnerVerified,
+          slot,
+          mood,
+          text: oneLineText,
+          likeCount: 0,
+          likedUserIds: [],
+          status: "active",
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+      }
+    });
+
+    logger.info("Harugyeol entry submitted", {
+      internalUserId: resolved.userId,
+      firebaseUid: resolved.firebaseUid,
+      dateKey,
+      slot,
+      mood,
+      reasonCount: reasons.length,
+      hasOneLineText: oneLineText.length > 0,
+    });
+
+    return {
+      ok: true,
+      dateKey,
+      slot,
+    };
+  }
+);
+
+exports.toggleHarugyeolCommentLike = onCall(
+  {
+    region: HARUGYEOL_REGION,
+    timeoutSeconds: 15,
+    memory: "256MiB",
+    maxInstances: 20,
+    invoker: "public",
+  },
+  async (request) => {
+    const resolved = await resolveCurrentUserForCallable(request);
+    const data = request.data || {};
+
+    const dateKey = normalizeString(data.dateKey);
+    const commentId = normalizeString(data.commentId);
+
+    if (!dateKey) {
+      throw new HttpsError("invalid-argument", "dateKey required.");
+    }
+
+    if (!commentId) {
+      throw new HttpsError("invalid-argument", "commentId required.");
+    }
+
+    assertHarugyeolDateKeyWithinRecent3Days(dateKey);
+
+    const nowIso = new Date().toISOString();
+
+    let liked = false;
+
+    await db.runTransaction(async (transaction) => {
+      const userSnapshot = await transaction.get(resolved.userRef);
+
+      if (!userSnapshot.exists) {
+        throw new HttpsError("not-found", "User document does not exist.");
+      }
+
+      const userData = userSnapshot.data() || {};
+      validateUserBelongsToFirebaseUid(userData, resolved.firebaseUid);
+
+      if (userData.profileSetupCompleted !== true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Profile setup must be completed first."
+        );
+      }
+
+      if (
+        normalizeString(userData.status) !== "active" ||
+        userData.isDeleted === true
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Inactive account cannot like harugyeol comment."
+        );
+      }
+
+      const commentRef = db
+        .collection("harugyeolDays")
+        .doc(dateKey)
+        .collection("comments")
+        .doc(commentId);
+
+      const commentSnapshot = await transaction.get(commentRef);
+
+      if (!commentSnapshot.exists) {
+        throw new HttpsError("not-found", "Harugyeol comment not found.");
+      }
+
+      const commentData = commentSnapshot.data() || {};
+
+      if (normalizeString(commentData.status) !== "active") {
+        throw new HttpsError(
+          "failed-precondition",
+          "Inactive harugyeol comment cannot be liked."
+        );
+      }
+
+      const likedUserIds = Array.isArray(commentData.likedUserIds)
+        ? commentData.likedUserIds.filter((value) => typeof value === "string")
+        : [];
+
+      const hasLiked = likedUserIds.includes(resolved.userId);
+
+      const nextLikedUserIds = hasLiked
+        ? likedUserIds.filter((value) => value !== resolved.userId)
+        : [...likedUserIds, resolved.userId];
+
+      liked = !hasLiked;
+
+      transaction.set(
+        commentRef,
+        {
+          likedUserIds: nextLikedUserIds,
+          likeCount: nextLikedUserIds.length,
+          updatedAt: nowIso,
+        },
+        {
+          merge: true,
+        }
+      );
+    });
+
+    logger.info("Harugyeol comment like toggled", {
+      internalUserId: resolved.userId,
+      firebaseUid: resolved.firebaseUid,
+      dateKey,
+      commentId,
+      liked,
+    });
+
+    return {
+      ok: true,
+      liked,
+    };
+  }
+);
+
+async function resolveCurrentUserForCallable(request) {
+  if (!request.auth || !request.auth.uid) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Firebase authentication is required."
+    );
+  }
+
+  const firebaseUid = request.auth.uid;
+  const linkRef = db.collection("auth_links").doc(firebaseUid);
+  const linkSnapshot = await linkRef.get();
+
+  if (!linkSnapshot.exists) {
+    throw new HttpsError("not-found", "Auth link document does not exist.");
+  }
+
+  const linkData = linkSnapshot.data() || {};
+  const userId = normalizeString(linkData.userId);
+
+  if (!userId) {
+    throw new HttpsError(
+      "data-loss",
+      "auth_links document exists but userId is empty."
+    );
+  }
+
+  return {
+    firebaseUid,
+    userId,
+    userRef: db.collection("users").doc(userId),
+  };
+}
+
+function validateUserBelongsToFirebaseUid(userData, firebaseUid) {
+  const userFirebaseUid = normalizeString(userData.firebaseUid);
+
+  if (userFirebaseUid !== firebaseUid) {
+    throw new HttpsError(
+      "permission-denied",
+      "User document does not belong to current Firebase user."
+    );
+  }
+}
+
+function normalizeString(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim();
+}
+
+function getHarugyeolKstNowParts(date = new Date()) {
+  const kst = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+
+  const year = kst.getUTCFullYear();
+  const month = String(kst.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(kst.getUTCDate()).padStart(2, "0");
+
+  const hour = kst.getUTCHours();
+  const minute = kst.getUTCMinutes();
+
+  return {
+    dateKey: `${year}-${month}-${day}`,
+    hour,
+    minute,
+    minutes: hour * 60 + minute,
+  };
+}
+
+function getHarugyeolDateKeyOffset(offsetDays) {
+  const now = new Date();
+  const shifted = new Date(now.getTime() + offsetDays * 24 * 60 * 60 * 1000);
+  return getHarugyeolKstNowParts(shifted).dateKey;
+}
+
+function canSubmitHarugyeolSlot(slot, minutes) {
+  const middayStart = 11 * 60;
+  const eveningStart = 17 * 60 + 1;
+  const eveningEnd = 23 * 60 + 59;
+
+  if (slot === "midday") {
+    return minutes >= middayStart && minutes <= eveningEnd;
+  }
+
+  if (slot === "evening") {
+    return minutes >= eveningStart && minutes <= eveningEnd;
+  }
+
+  return false;
+}
+
+function resolveHarugyeolGraphHour({ slot, hour, minutes }) {
+  const middayStart = 11 * 60;
+  const middayEnd = 17 * 60;
+  const eveningStart = 17 * 60 + 1;
+  const dayEnd = 23 * 60 + 59;
+
+  if (!HARUGYEOL_VALID_SLOTS.has(slot)) {
+    return null;
+  }
+
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23) {
+    return null;
+  }
+
+  if (!Number.isFinite(minutes)) {
+    return null;
+  }
+
+  if (slot === "midday") {
+    if (minutes < middayStart || minutes > middayEnd) {
+      return null;
+    }
+
+    return Math.min(Math.max(hour, 11), 16);
+  }
+
+  if (slot === "evening") {
+    if (minutes < eveningStart || minutes > dayEnd) {
+      return null;
+    }
+
+    return Math.min(Math.max(hour, 17), 22);
+  }
+
+  return null;
+}
+
+function parseHarugyeolReasons(rawReasons) {
+  if (!Array.isArray(rawReasons)) {
+    throw new HttpsError("invalid-argument", "Harugyeol reasons must be array.");
+  }
+
+  const result = [];
+
+  rawReasons.forEach((raw) => {
+    const reason = normalizeString(raw);
+
+    if (!HARUGYEOL_VALID_REASONS.has(reason)) {
+      throw new HttpsError("invalid-argument", "Invalid harugyeol reason.");
+    }
+
+    const normalizedReason = HARUGYEOL_REASON_KEY_ALIASES[reason] || reason;
+
+    if (!result.includes(normalizedReason)) {
+      result.push(normalizedReason);
+    }
+  });
+
+  if (result.length === 0) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Harugyeol reason must contain at least one item."
+    );
+  }
+
+  if (result.length > 10) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Harugyeol reasons are too many."
+    );
+  }
+
+  return result;
+}
+
+function assertHarugyeolDateKeyWithinRecent3Days(dateKey) {
+  const allowed = new Set([
+    getHarugyeolDateKeyOffset(0),
+    getHarugyeolDateKeyOffset(-1),
+    getHarugyeolDateKeyOffset(-2),
+  ]);
+
+  if (!allowed.has(dateKey)) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Only recent harugyeol comments can be liked."
+    );
+  }
+}
+
+function normalizeHarugyeolHourlyStats(raw) {
+  const result = {};
+
+  if (!raw || typeof raw !== "object") {
+    return result;
+  }
+
+  Object.keys(raw).forEach((key) => {
+    const value = raw[key];
+
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    const slot = normalizeString(value.slot);
+    const hour = Math.trunc(toFiniteNumber(value.hour));
+
+    if (!HARUGYEOL_VALID_SLOTS.has(slot)) {
+      return;
+    }
+
+    if (hour < 0 || hour > 23) {
+      return;
+    }
+
+    const count = toFiniteNumber(value.count);
+    const scoreSum = toFiniteNumber(value.scoreSum);
+
+    if (count <= 0) {
+      return;
+    }
+
+    const hourKey = String(hour).padStart(2, "0");
+    const normalizedKey = `${slot}_${hourKey}`;
+
+    result[normalizedKey] = {
+      hour,
+      slot,
+      count,
+      scoreSum,
+      averageScore:
+        count > 0
+          ? toFiniteNumber(value.averageScore) || scoreSum / count
+          : 0,
+    };
+  });
+
+  return result;
+}
+
+function createEmptyHarugyeolHourlyStat({ slot, hour }) {
+  return {
+    hour,
+    slot,
+    count: 0,
+    scoreSum: 0,
+    averageScore: 0,
+  };
+}
+
+function normalizeHarugyeolSlotStats(raw) {
+  const result = {
+    midday: createEmptyHarugyeolSlotStat(),
+    evening: createEmptyHarugyeolSlotStat(),
+  };
+
+  if (!raw || typeof raw !== "object") {
+    return result;
+  }
+
+  ["midday", "evening"].forEach((slot) => {
+    const value = raw[slot];
+
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    const count = toFiniteNumber(value.count);
+    const scoreSum = toFiniteNumber(value.scoreSum);
+
+    result[slot] = {
+      count,
+      scoreSum,
+      averageScore:
+        count > 0
+          ? toFiniteNumber(value.averageScore) || scoreSum / count
+          : 0,
+      moodCounts: normalizeHarugyeolMoodCounts(value.moodCounts),
+      reasonCounts: normalizeHarugyeolReasonCounts(value.reasonCounts),
+    };
+  });
+
+  return result;
+}
+
+function createEmptyHarugyeolSlotStat() {
+  return {
+    count: 0,
+    scoreSum: 0,
+    averageScore: 0,
+    moodCounts: normalizeHarugyeolMoodCounts(null),
+    reasonCounts: normalizeHarugyeolReasonCounts(null),
+  };
+}
+
+function normalizeHarugyeolMoodCounts(raw) {
+  const result = {
+    slow: 0,
+    normal: 0,
+    good: 0,
+    great: 0,
+  };
+
+  if (!raw || typeof raw !== "object") {
+    return result;
+  }
+
+  Object.keys(result).forEach((key) => {
+    result[key] = toFiniteNumber(raw[key]);
+  });
+
+  return result;
+}
+
+function normalizeHarugyeolReasonCounts(raw) {
+  const result = {
+    economy: 0,
+    weekdayHoliday: 0,
+    delivery: 0,
+    localMood: 0,
+    event: 0,
+    groupGuest: 0,
+    rudeGuest: 0,
+    unexpectedGood: 0,
+    weather: 0,
+    etc: 0,
+  };
+
+  if (!raw || typeof raw !== "object") {
+    return result;
+  }
+
+  Object.keys(raw).forEach((key) => {
+    const normalizedKey = HARUGYEOL_REASON_KEY_ALIASES[key] || key;
+
+    if (!Object.prototype.hasOwnProperty.call(result, normalizedKey)) {
+      return;
+    }
+
+    result[normalizedKey] =
+      toFiniteNumber(result[normalizedKey]) + toFiniteNumber(raw[key]);
+  });
+
+  return result;
+}
+
+function toFiniteNumber(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  return number;
+}
+
+// END_OF_FILE: functions/src/harugyeol.js
+
+--- FILE NOT FOUND: functions/src/harugyeol.ts ---
+
+--- FILE NOT FOUND: functions/src/harugyeol/index.js ---
+
+--- FILE NOT FOUND: functions/src/harugyeol/index.ts ---
+
+--- FILE NOT FOUND: functions/src/callables/harugyeol.js ---
+
+--- FILE NOT FOUND: functions/src/callables/harugyeol.ts ---
+
+================================================
+FILE_PATH: firestore.rules
+================================================
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function authLinkPath() {
+      return /databases/$(database)/documents/auth_links/$(request.auth.uid);
+    }
+
+    function hasAuthLink() {
+      return signedIn() && exists(authLinkPath());
+    }
+
+    function currentUserId() {
+      return hasAuthLink() ? get(authLinkPath()).data.userId : '';
+    }
+
+    function userPath(userId) {
+      return /databases/$(database)/documents/users/$(userId);
+    }
+
+    function userExists(userId) {
+      return userId is string
+        && userId.size() > 0
+        && exists(userPath(userId));
+    }
+
+    function userData(userId) {
+      return get(userPath(userId)).data;
+    }
+
+    function communityUserSanctionAllowed(data) {
+      return (
+        (
+          !data.keys().hasAny(['role'])
+          || data.role != 'banned'
+        )
+        && (
+          !data.keys().hasAny(['sanctionStatus'])
+          || data.sanctionStatus in ['normal', 'none', 'warned']
+          || (
+            data.sanctionStatus == 'suspended'
+            && data.keys().hasAny(['sanctionUntil'])
+            && data.sanctionUntil is timestamp
+            && data.sanctionUntil <= request.time
+          )
+        )
+      );
+    }
+
+    function isValidActiveUser(userId) {
+      return signedIn()
+        && userExists(userId)
+        && userData(userId).firebaseUid == request.auth.uid
+        && userData(userId).status == 'active'
+        && userData(userId).isDeleted == false
+        && userData(userId).profileSetupCompleted == true
+        && communityUserSanctionAllowed(userData(userId));
+    }
+
+    function isCurrentUser(userId) {
+      return hasAuthLink()
+        && userId is string
+        && userId == currentUserId()
+        && isValidActiveUser(userId);
+    }
+
+    function isAdmin() {
+      let uid = currentUserId();
+
+      return hasAuthLink()
+        && uid is string
+        && uid.size() > 0
+        && userExists(uid)
+        && userData(uid).firebaseUid == request.auth.uid
+        && userData(uid).status == 'active'
+        && userData(uid).isDeleted == false
+        && userData(uid).role == 'admin';
+    }
+
+    function isBusinessVerifiedUser(userId) {
+      return userExists(userId)
+        && userData(userId).keys().hasAny(['business'])
+        && userData(userId).business.keys().hasAny(['status'])
+        && userData(userId).business.status == 'verified';
+    }
+
+    function userNickname(userId) {
+      return userData(userId).keys().hasAny(['storeProfile'])
+        && userData(userId).storeProfile.keys().hasAny(['nickname'])
+        ? userData(userId).storeProfile.nickname
+        : '';
+    }
+
+    function userIndustry(userId) {
+      return userData(userId).keys().hasAny(['storeProfile'])
+        && userData(userId).storeProfile.keys().hasAny(['industry'])
+        ? userData(userId).storeProfile.industry
+        : null;
+    }
+
+    function userRegion(userId) {
+      return userData(userId).keys().hasAny(['storeProfile'])
+        && userData(userId).storeProfile.keys().hasAny(['region'])
+        ? userData(userId).storeProfile.region
+        : null;
+    }
+
+    function validAuthorSnapshotForCreate(userId) {
+      return isCurrentUser(userId)
+        && request.resource.data.authorLabel == userNickname(userId)
+        && request.resource.data.isOwnerVerified == isBusinessVerifiedUser(userId);
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function postRequiredKeys() {
+      return [
+        'id',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'title',
+        'body',
+        'boardType',
+        'createdAt',
+        'updatedAt',
+        'deletedAt',
+        'status',
+        'commentCount',
+        'likeCount',
+        'viewCount',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'imageUrls',
+        'likedUserIds'
+      ];
+    }
+
+    function postBaseKeys() {
+      return [
+        'id',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'title',
+        'body',
+        'boardType',
+        'usedType',
+        'isSold',
+        'industryId',
+        'locationLabel',
+        'createdAt',
+        'updatedAt',
+        'deletedAt',
+        'status',
+        'commentCount',
+        'likeCount',
+        'viewCount',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'imageUrls',
+        'imagePaths',
+        'likedUserIds'
+      ];
+    }
+
+    function commentRequiredKeys() {
+      return [
+        'id',
+        'postId',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'text',
+        'likeCount',
+        'likedUserIds',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'isDeleted',
+        'status',
+        'createdAt',
+        'updatedAt',
+        'deletedAt'
+      ];
+    }
+
+    function commentBaseKeys() {
+      return [
+        'id',
+        'postId',
+        'authorId',
+        'authorLabel',
+        'isOwnerVerified',
+        'industryId',
+        'locationLabel',
+        'text',
+        'parentId',
+        'likeCount',
+        'likedUserIds',
+        'reportCount',
+        'reportedUserIds',
+        'reportReasons',
+        'reportReasonCounts',
+        'isReportThresholdReached',
+        'isHiddenByAdmin',
+        'adminHiddenReason',
+        'adminHiddenAt',
+        'adminRemovedAt',
+        'adminRemovedReason',
+        'isDeleted',
+        'status',
+        'createdAt',
+        'updatedAt',
+        'deletedAt'
+      ];
+    }
+
+    function postImmutableFieldsUnchanged() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.authorLabel == resource.data.authorLabel
+        && request.resource.data.isOwnerVerified == resource.data.isOwnerVerified
+        && request.resource.data.boardType == resource.data.boardType
+        && request.resource.data.industryId == resource.data.industryId
+        && request.resource.data.locationLabel == resource.data.locationLabel
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function commentImmutableFieldsUnchanged() {
+      return request.resource.data.id == resource.data.id
+        && request.resource.data.postId == resource.data.postId
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.authorLabel == resource.data.authorLabel
+        && request.resource.data.isOwnerVerified == resource.data.isOwnerVerified
+        && request.resource.data.industryId == resource.data.industryId
+        && request.resource.data.locationLabel == resource.data.locationLabel
+        && request.resource.data.parentId == resource.data.parentId
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function readablePost() {
+      return resource.data.status == 'active'
+        && resource.data.deletedAt == null
+        && resource.data.isHiddenByAdmin == false
+        && resource.data.isReportThresholdReached == false
+        && resource.data.adminRemovedAt == null;
+    }
+
+    function readableComment() {
+      return (
+          resource.data.status == 'active'
+          && resource.data.isDeleted == false
+          && resource.data.deletedAt == null
+          && resource.data.isHiddenByAdmin == false
+          && resource.data.isReportThresholdReached == false
+          && resource.data.adminRemovedAt == null
+        )
+        || resource.data.status == 'deletedByAuthor';
+    }
+
+    function isPostOwner() {
+      return signedIn()
+        && resource.data.authorId is string
+        && resource.data.authorId == currentUserId()
+        && isValidActiveUser(resource.data.authorId);
+    }
+
+    function isCommentOwner() {
+      return signedIn()
+        && resource.data.authorId is string
+        && resource.data.authorId == currentUserId()
+        && isValidActiveUser(resource.data.authorId);
+    }
+
+    function hasValidPostImageFields() {
+      return request.resource.data.imageUrls is list
+        && request.resource.data.imageUrls.size() <= 5
+        && (
+          !request.resource.data.keys().hasAny(['imagePaths'])
+          || (
+            request.resource.data.imagePaths is list
+            && request.resource.data.imagePaths.size() <= 5
+          )
+        );
+    }
+
+    function hasClearedPostImages() {
+      return request.resource.data.imageUrls is list
+        && request.resource.data.imageUrls.size() == 0
+        && (
+          !request.resource.data.keys().hasAny(['imagePaths'])
+          || (
+            request.resource.data.imagePaths is list
+            && request.resource.data.imagePaths.size() == 0
+          )
+        );
+    }
+
+    function validPostCreate() {
+      return request.resource.data.keys().hasOnly(postBaseKeys())
+        && request.resource.data.keys().hasAll(postRequiredKeys())
+        && request.resource.data.id is string
+        && request.resource.data.id.size() > 0
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.authorId is string
+        && validAuthorSnapshotForCreate(request.resource.data.authorId)
+        && request.resource.data.authorLabel is string
+        && request.resource.data.authorLabel.size() >= 2
+        && request.resource.data.authorLabel.size() <= 10
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 2
+        && request.resource.data.title.size() <= 60
+        && request.resource.data.body is string
+        && request.resource.data.body.size() >= 1
+        && request.resource.data.body.size() <= 1000
+        && request.resource.data.boardType in ['free', 'owner', 'used']
+        && (
+          !request.resource.data.keys().hasAny(['usedType'])
+          || request.resource.data.usedType == null
+          || request.resource.data.usedType is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['isSold'])
+          || request.resource.data.isSold is bool
+        )
+        && (
+          !request.resource.data.keys().hasAny(['industryId'])
+          || request.resource.data.industryId == null
+          || request.resource.data.industryId is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['locationLabel'])
+          || request.resource.data.locationLabel == null
+          || request.resource.data.locationLabel is string
+        )
+        && request.resource.data.status == 'active'
+        && request.resource.data.deletedAt == null
+        && request.resource.data.commentCount == 0
+        && request.resource.data.likeCount == 0
+        && request.resource.data.viewCount == 0
+        && request.resource.data.reportCount == 0
+        && request.resource.data.reportedUserIds is list
+        && request.resource.data.reportedUserIds.size() == 0
+        && request.resource.data.reportReasons is list
+        && request.resource.data.reportReasons.size() == 0
+        && request.resource.data.reportReasonCounts is map
+        && request.resource.data.reportReasonCounts.size() == 0
+        && request.resource.data.isReportThresholdReached == false
+        && request.resource.data.isHiddenByAdmin == false
+        && request.resource.data.adminHiddenReason == null
+        && request.resource.data.adminHiddenAt == null
+        && request.resource.data.adminRemovedAt == null
+        && request.resource.data.adminRemovedReason == null
+        && request.resource.data.likedUserIds is list
+        && request.resource.data.likedUserIds.size() == 0
+        && hasValidPostImageFields();
+    }
+
+    function validCommentCreate() {
+      return request.resource.data.keys().hasOnly(commentBaseKeys())
+        && request.resource.data.keys().hasAll(commentRequiredKeys())
+        && request.resource.data.id is string
+        && request.resource.data.id.size() > 0
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && exists(/databases/$(database)/documents/posts/$(request.resource.data.postId))
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.status == 'active'
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.deletedAt == null
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.isHiddenByAdmin == false
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.isReportThresholdReached == false
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.adminRemovedAt == null
+        && request.resource.data.authorId is string
+        && validAuthorSnapshotForCreate(request.resource.data.authorId)
+        && request.resource.data.authorLabel is string
+        && request.resource.data.authorLabel.size() >= 2
+        && request.resource.data.authorLabel.size() <= 10
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 1
+        && request.resource.data.text.size() <= 500
+        && (
+          !request.resource.data.keys().hasAny(['industryId'])
+          || request.resource.data.industryId == null
+          || request.resource.data.industryId is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['locationLabel'])
+          || request.resource.data.locationLabel == null
+          || request.resource.data.locationLabel is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['parentId'])
+          || request.resource.data.parentId == null
+          || request.resource.data.parentId is string
+        )
+        && request.resource.data.likeCount == 0
+        && request.resource.data.likedUserIds is list
+        && request.resource.data.likedUserIds.size() == 0
+        && request.resource.data.reportCount == 0
+        && request.resource.data.reportedUserIds is list
+        && request.resource.data.reportedUserIds.size() == 0
+        && request.resource.data.reportReasons is list
+        && request.resource.data.reportReasons.size() == 0
+        && request.resource.data.reportReasonCounts is map
+        && request.resource.data.reportReasonCounts.size() == 0
+        && request.resource.data.isReportThresholdReached == false
+        && request.resource.data.isHiddenByAdmin == false
+        && request.resource.data.adminHiddenReason == null
+        && request.resource.data.adminHiddenAt == null
+        && request.resource.data.adminRemovedAt == null
+        && request.resource.data.adminRemovedReason == null
+        && request.resource.data.isDeleted == false
+        && request.resource.data.status == 'active'
+        && request.resource.data.deletedAt == null;
+    }
+
+    function validPostOwnerUpdate() {
+      return isCurrentUser(resource.data.authorId)
+        && postImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'title',
+          'body',
+          'usedType',
+          'isSold',
+          'imageUrls',
+          'imagePaths',
+          'updatedAt'
+        ])
+        && resource.data.status == 'active'
+        && resource.data.deletedAt == null
+        && resource.data.isHiddenByAdmin == false
+        && resource.data.isReportThresholdReached == false
+        && resource.data.adminRemovedAt == null
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 2
+        && request.resource.data.title.size() <= 60
+        && request.resource.data.body is string
+        && request.resource.data.body.size() >= 1
+        && request.resource.data.body.size() <= 1000
+        && (
+          !request.resource.data.keys().hasAny(['usedType'])
+          || request.resource.data.usedType == null
+          || request.resource.data.usedType is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['isSold'])
+          || request.resource.data.isSold is bool
+        )
+        && hasValidPostImageFields();
+    }
+
+    function validPostOwnerSoftDelete() {
+      return false;
+    }
+
+    function validPostViewUpdate() {
+      return false;
+    }
+
+    function validPostLikeUpdate() {
+      return false;
+    }
+
+    function validPostCommentCountUpdate() {
+      return false;
+    }
+
+    function validPostAdminUpdate() {
+      return isAdmin()
+        && postImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'isHiddenByAdmin',
+          'status',
+          'adminHiddenReason',
+          'adminHiddenAt',
+          'adminRemovedAt',
+          'adminRemovedReason',
+          'isReportThresholdReached',
+          'updatedAt',
+          'isSold'
+        ])
+        && request.resource.data.status in [
+          'active',
+          'hiddenByReport',
+          'hiddenByAdmin',
+          'removedByAdmin'
+        ]
+        && (
+          request.resource.data.status != 'active'
+          || (
+            request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.adminHiddenReason == null
+            && request.resource.data.adminHiddenAt == null
+            && request.resource.data.adminRemovedAt == null
+            && request.resource.data.adminRemovedReason == null
+            && request.resource.data.isReportThresholdReached == false
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByAdmin'
+          || (
+            request.resource.data.isHiddenByAdmin == true
+            && request.resource.data.adminHiddenReason is string
+            && request.resource.data.adminHiddenReason.size() > 0
+            && request.resource.data.adminHiddenAt != null
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByReport'
+          || request.resource.data.isReportThresholdReached == true
+        )
+        && (
+          request.resource.data.status != 'removedByAdmin'
+          || (
+            request.resource.data.adminRemovedAt != null
+            && request.resource.data.adminRemovedReason is string
+            && request.resource.data.adminRemovedReason.size() > 0
+            && request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.isReportThresholdReached == false
+          )
+        );
+    }
+
+    function validCommentOwnerUpdate() {
+      return isCurrentUser(resource.data.authorId)
+        && commentImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'text',
+          'updatedAt'
+        ])
+        && resource.data.status == 'active'
+        && resource.data.isDeleted == false
+        && resource.data.deletedAt == null
+        && resource.data.isHiddenByAdmin == false
+        && resource.data.isReportThresholdReached == false
+        && resource.data.adminRemovedAt == null
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 1
+        && request.resource.data.text.size() <= 500;
+    }
+
+    function validCommentOwnerSoftDelete() {
+      return false;
+    }
+
+    function validCommentLikeUpdate() {
+      return false;
+    }
+
+    function validCommentAdminUpdate() {
+      return isAdmin()
+        && commentImmutableFieldsUnchanged()
+        && changedKeys().hasOnly([
+          'isHiddenByAdmin',
+          'status',
+          'adminHiddenReason',
+          'adminHiddenAt',
+          'adminRemovedAt',
+          'adminRemovedReason',
+          'isReportThresholdReached',
+          'isDeleted',
+          'deletedAt',
+          'updatedAt'
+        ])
+        && request.resource.data.status in [
+          'active',
+          'deletedByAuthor',
+          'hiddenByReport',
+          'hiddenByAdmin',
+          'removedByAdmin'
+        ]
+        && (
+          request.resource.data.status != 'active'
+          || (
+            request.resource.data.isDeleted == false
+            && request.resource.data.deletedAt == null
+            && request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.adminHiddenReason == null
+            && request.resource.data.adminHiddenAt == null
+            && request.resource.data.adminRemovedAt == null
+            && request.resource.data.adminRemovedReason == null
+            && request.resource.data.isReportThresholdReached == false
+          )
+        )
+        && (
+          request.resource.data.status != 'deletedByAuthor'
+          || (
+            request.resource.data.isDeleted == true
+            && request.resource.data.deletedAt != null
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByAdmin'
+          || (
+            request.resource.data.isHiddenByAdmin == true
+            && request.resource.data.adminHiddenReason is string
+            && request.resource.data.adminHiddenReason.size() > 0
+            && request.resource.data.adminHiddenAt != null
+          )
+        )
+        && (
+          request.resource.data.status != 'hiddenByReport'
+          || request.resource.data.isReportThresholdReached == true
+        )
+        && (
+          request.resource.data.status != 'removedByAdmin'
+          || (
+            request.resource.data.adminRemovedAt != null
+            && request.resource.data.adminRemovedReason is string
+            && request.resource.data.adminRemovedReason.size() > 0
+            && request.resource.data.isHiddenByAdmin == false
+            && request.resource.data.isReportThresholdReached == false
+          )
+        );
+    }
+
+    function validPostLikeCreate() {
+      let uid = currentUserId();
+
+      return isCurrentUser(uid)
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'postId',
+          'userId',
+          'createdAt'
+        ])
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.userId == uid
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && exists(/databases/$(database)/documents/posts/$(request.resource.data.postId))
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data.status == 'active';
+    }
+
+    function validCommentLikeCreate() {
+      let uid = currentUserId();
+
+      return isCurrentUser(uid)
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'postId',
+          'commentId',
+          'userId',
+          'createdAt'
+        ])
+        && request.resource.data.id == request.resource.id
+        && request.resource.data.userId == uid
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && request.resource.data.commentId is string
+        && request.resource.data.commentId.size() > 0
+        && exists(/databases/$(database)/documents/comments/$(request.resource.data.commentId))
+        && get(/databases/$(database)/documents/comments/$(request.resource.data.commentId)).data.status == 'active';
+    }
+
+    function isSafePostListQuery() {
+      return request.query.limit != null
+        && request.query.limit <= 200;
+    }
+
+    function isSafeCommentListQuery() {
+      return request.query.limit != null
+        && request.query.limit <= 300;
+    }
+
+    match /auth_links/{firebaseUid} {
+      allow read, write: if false;
+    }
+
+    match /nicknames/{nicknameKey} {
+      allow read, write: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if signedIn()
+        && resource.data.firebaseUid == request.auth.uid;
+
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /notices/{noticeId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /admin_actions/{actionId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /audit_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /push_tokens/{tokenId} {
+      allow read, write: if false;
+    }
+
+    match /user_blocks/{blockId} {
+      allow read, write: if false;
+    }
+
+    match /user_private/{documentId} {
+      allow read, write: if false;
+    }
+
+    match /posts/{postId} {
+      allow get: if readablePost()
+        || isPostOwner()
+        || isAdmin();
+
+      allow list: if isAdmin()
+        || (
+          isSafePostListQuery()
+          && (
+            readablePost()
+            || isPostOwner()
+          )
+        );
+
+      allow create: if signedIn()
+        && validPostCreate();
+
+      allow update: if signedIn()
+        && request.resource.data.keys().hasOnly(postBaseKeys())
+        && (
+          validPostOwnerUpdate()
+          || validPostAdminUpdate()
+        );
+
+      allow delete: if false;
+    }
+
+    match /comments/{commentId} {
+      allow get: if readableComment()
+        || isCommentOwner()
+        || isAdmin();
+
+      allow list: if isAdmin()
+        || (
+          isSafeCommentListQuery()
+          && (
+            readableComment()
+            || isCommentOwner()
+          )
+        );
+
+      allow create: if false;
+
+      allow update: if signedIn()
+        && request.resource.data.keys().hasOnly(commentBaseKeys())
+        && (
+          validCommentOwnerUpdate()
+          || validCommentAdminUpdate()
+        );
+
+      allow delete: if false;
+    }
+
+    match /post_likes/{likeId} {
+      allow get, list: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /comment_likes/{likeId} {
+      allow get, list: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /harugyeolDays/{dateKey} {
+      allow get, list: if true;
+
+      allow create, update, delete: if false;
+
+      match /entries/{entryId} {
+        allow get: if signedIn()
+          && (
+            resource.data.userId == currentUserId()
+            || isAdmin()
+          );
+
+        allow list: if signedIn()
+          && request.query.limit != null
+          && request.query.limit <= 100
+          && (
+            resource.data.userId == currentUserId()
+            || isAdmin()
+          );
+
+        allow create, update, delete: if false;
+      }
+
+      match /comments/{commentId} {
+        allow get: if resource.data.status == 'active'
+          || isAdmin();
+
+        allow list: if request.query.limit != null
+          && request.query.limit <= 100
+          && (
+            resource.data.status == 'active'
+            || isAdmin()
+          );
+
+        allow create, update, delete: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+// END_OF_FILE: firestore.rules

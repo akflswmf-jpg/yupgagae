@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:get/get.dart';
 
+import 'package:yupgagae/core/auth/app_user.dart';
 import 'package:yupgagae/core/auth/auth_controller.dart';
 import 'package:yupgagae/features/harugyeol/domain/harugyeol_comment.dart';
 import 'package:yupgagae/features/harugyeol/domain/harugyeol_day_summary.dart';
@@ -32,10 +35,30 @@ class FirestoreHarugyeolRepository implements HarugyeolRepository {
     return Get.find<AuthController>();
   }
 
-  String get _currentUserId {
-    final userId = _authOrNull?.currentUser.value?.userId.trim();
-    if (userId == null || userId.isEmpty) return '';
-    return userId;
+  AppUser? get _currentUser {
+    return _authOrNull?.currentUser.value;
+  }
+
+  List<String> get _currentUserLookupIds {
+    final user = _currentUser;
+    if (user == null) {
+      return const <String>[];
+    }
+
+    final ids = <String>[
+      user.userId.trim(),
+      user.firebaseUid.trim(),
+    ].where((value) {
+      return value.isNotEmpty;
+    }).toSet().toList(growable: false);
+
+    return ids;
+  }
+
+  String get _primaryCurrentUserId {
+    final ids = _currentUserLookupIds;
+    if (ids.isEmpty) return '';
+    return ids.first;
   }
 
   @override
@@ -57,34 +80,94 @@ class FirestoreHarugyeolRepository implements HarugyeolRepository {
   @override
   Stream<List<HarugyeolEntry>> watchMyEntries(String dateKey) {
     final safeDateKey = dateKey.trim();
-    final userId = _currentUserId;
+    final lookupIds = _currentUserLookupIds;
 
-    if (safeDateKey.isEmpty || userId.isEmpty) {
+    if (safeDateKey.isEmpty || lookupIds.isEmpty) {
       return Stream.value(const <HarugyeolEntry>[]);
     }
 
-    return _daysCol
-        .doc(safeDateKey)
-        .collection('entries')
-        .where('userId', isEqualTo: userId)
-        .snapshots()
-        .map((snap) {
-      final list = snap.docs.map((doc) {
-        return HarugyeolEntry.fromJson({
-          ...doc.data(),
-          'id': (doc.data()['id'] ?? doc.id).toString(),
-        });
-      }).toList();
+    final entriesCol = _daysCol.doc(safeDateKey).collection('entries');
 
-      list.sort((a, b) => a.slot.key.compareTo(b.slot.key));
-      return list;
-    });
+    final docIds = <String>{
+      for (final userId in lookupIds)
+        for (final slot in HarugyeolSlot.values) '${userId}_${slot.key}',
+    }.where((value) => value.trim().isNotEmpty).toList(growable: false);
+
+    if (docIds.isEmpty) {
+      return Stream.value(const <HarugyeolEntry>[]);
+    }
+
+    final controller = StreamController<List<HarugyeolEntry>>();
+    final snapshotsByDocId = <String, DocumentSnapshot<Map<String, dynamic>>>{};
+    final subscriptions = <StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>>[];
+
+    void emit() {
+      final bySlot = <HarugyeolSlot, HarugyeolEntry>{};
+
+      for (final snapshot in snapshotsByDocId.values) {
+        if (!snapshot.exists) continue;
+
+        final data = snapshot.data();
+        if (data == null) continue;
+
+        final entry = HarugyeolEntry.fromJson({
+          ...data,
+          'id': (data['id'] ?? snapshot.id).toString(),
+        });
+
+        final previous = bySlot[entry.slot];
+
+        if (previous == null || entry.updatedAt.isAfter(previous.updatedAt)) {
+          bySlot[entry.slot] = entry;
+        }
+      }
+
+      final list = bySlot.values.toList(growable: false);
+
+      list.sort((a, b) {
+        final slotCompare = a.slot.index.compareTo(b.slot.index);
+        if (slotCompare != 0) return slotCompare;
+
+        final dateCompare = a.createdAt.compareTo(b.createdAt);
+        if (dateCompare != 0) return dateCompare;
+
+        return a.id.compareTo(b.id);
+      });
+
+      if (!controller.isClosed) {
+        controller.add(list);
+      }
+    }
+
+    for (final docId in docIds) {
+      final sub = entriesCol.doc(docId).snapshots().listen(
+        (snapshot) {
+          snapshotsByDocId[docId] = snapshot;
+          emit();
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!controller.isClosed) {
+            controller.addError(error, stackTrace);
+          }
+        },
+      );
+
+      subscriptions.add(sub);
+    }
+
+    controller.onCancel = () async {
+      for (final sub in subscriptions) {
+        await sub.cancel();
+      }
+    };
+
+    return controller.stream;
   }
 
   @override
   Stream<List<HarugyeolComment>> watchComments(String dateKey) {
     final safeDateKey = dateKey.trim();
-    final userId = _currentUserId;
+    final userId = _primaryCurrentUserId;
 
     if (safeDateKey.isEmpty) {
       return Stream.value(const <HarugyeolComment>[]);
@@ -98,10 +181,12 @@ class FirestoreHarugyeolRepository implements HarugyeolRepository {
         .snapshots()
         .map((snap) {
       final list = snap.docs.map((doc) {
+        final data = doc.data();
+
         return HarugyeolComment.fromJson(
           {
-            ...doc.data(),
-            'id': (doc.data()['id'] ?? doc.id).toString(),
+            ...data,
+            'id': (data['id'] ?? doc.id).toString(),
           },
           currentUserId: userId,
         );
@@ -113,7 +198,10 @@ class FirestoreHarugyeolRepository implements HarugyeolRepository {
         final likeCompare = b.likeCount.compareTo(a.likeCount);
         if (likeCompare != 0) return likeCompare;
 
-        return b.createdAt.compareTo(a.createdAt);
+        final dateCompare = b.createdAt.compareTo(a.createdAt);
+        if (dateCompare != 0) return dateCompare;
+
+        return a.id.compareTo(b.id);
       });
 
       return list;
@@ -122,7 +210,7 @@ class FirestoreHarugyeolRepository implements HarugyeolRepository {
 
   @override
   Future<void> submitEntry(HarugyeolSubmitInput input) async {
-    final user = _authOrNull?.currentUser.value;
+    final user = _currentUser;
 
     if (user == null) {
       throw Exception('로그인이 필요합니다.');
@@ -139,14 +227,15 @@ class FirestoreHarugyeolRepository implements HarugyeolRepository {
     final callable = functions.httpsCallable('submitHarugyeolEntry');
 
     await callable.call({
-      'dateKey': input.dateKey,
+      'dateKey': input.dateKey.trim(),
       'slot': input.slot.key,
       'mood': input.mood.key,
       'score': input.mood.score,
-      'reasons': input.reasons.map((e) => e.key).toList(),
+      'reasons': input.reasons.map((e) => e.key).toList(growable: false),
       'oneLineText': input.oneLineText.trim(),
       'clientUser': {
-        'userId': user.userId,
+        'userId': user.userId.trim(),
+        'firebaseUid': user.firebaseUid.trim(),
         'authorLabel': user.nickname?.trim().isNotEmpty == true
             ? user.nickname!.trim()
             : '익명',
@@ -162,7 +251,7 @@ class FirestoreHarugyeolRepository implements HarugyeolRepository {
     required String dateKey,
     required String commentId,
   }) async {
-    final user = _authOrNull?.currentUser.value;
+    final user = _currentUser;
 
     if (user == null) {
       throw Exception('로그인이 필요합니다.');

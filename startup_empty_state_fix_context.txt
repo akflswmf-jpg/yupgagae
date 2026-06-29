@@ -1,0 +1,3589 @@
+﻿
+================================================
+FILE_PATH: lib/root_shell.dart
+================================================
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/app_user.dart';
+import 'package:yupgagae/core/auth/auth_binding.dart';
+import 'package:yupgagae/core/auth/auth_controller.dart';
+import 'package:yupgagae/core/ui/app_toast.dart';
+import 'package:yupgagae/features/community/controller/home_feed_controller.dart';
+import 'package:yupgagae/features/community/view/community_shell.dart';
+import 'package:yupgagae/features/harugyeol/view/harugyeol_screen.dart';
+import 'package:yupgagae/features/home/home_screen.dart';
+import 'package:yupgagae/features/my_store/controller/my_store_controller.dart';
+import 'package:yupgagae/features/my_store/view/my_store_screen.dart'
+    as my_store_screen;
+import 'package:yupgagae/routes/app_routes.dart';
+
+class RootShell extends StatefulWidget {
+  const RootShell({super.key});
+
+  @override
+  State<RootShell> createState() => _RootShellState();
+}
+
+class _RootShellState extends State<RootShell> {
+  static const int homeTabIndex = 0;
+  static const int communityTabIndex = 1;
+  static const int harugyeolTabIndex = 2;
+  static const int myStoreTabIndex = 3;
+
+  int index = _resolveInitialIndex();
+
+  late final AuthController authController;
+  late final MyStoreController myStoreController;
+
+  late final List<Widget> pages;
+
+  DateTime? _lastHomeSoftRefreshAt;
+
+  Worker? _sanctionNoticeWorker;
+
+  bool _startupGuardStarted = false;
+  bool _startupReady = false;
+  bool _pagesCreated = false;
+  bool _nativeSplashRemoved = false;
+  bool _sanctionNoticeOpen = false;
+
+  String? _lastPresentedSanctionNoticeKey;
+  String? _lastAcknowledgedWarningNoticeKey;
+
+  static const Color kYupgagaeAccent = Color(0xFFA56E5F);
+  static const Color _backgroundColor = Colors.white;
+  static const Color _inactiveTabColor = Color(0xFF9CA3AF);
+  static const Duration _homeSoftRefreshCooldown = Duration(seconds: 30);
+
+  static int _resolveInitialIndex() {
+    final args = Get.arguments;
+
+    if (args is Map) {
+      final value = args['initialIndex'] ?? args['tabIndex'] ?? args['tab'];
+
+      if (value is int && value >= homeTabIndex && value <= myStoreTabIndex) {
+        return value;
+      }
+
+      if (value is String) {
+        switch (value.trim()) {
+          case 'home':
+            return homeTabIndex;
+          case 'community':
+            return communityTabIndex;
+          case 'harugyeol':
+          case 'haru':
+          case 'daily':
+          case 'flow':
+          case '하루결':
+            return harugyeolTabIndex;
+          case 'myStore':
+          case 'my_store':
+          case 'store':
+            return myStoreTabIndex;
+        }
+      }
+    }
+
+    return homeTabIndex;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    if (!Get.isRegistered<AuthController>()) {
+      AuthBinding().dependencies();
+    }
+
+    authController = Get.find<AuthController>();
+    myStoreController = Get.find<MyStoreController>();
+
+    _sanctionNoticeWorker = ever<AppUser?>(
+      authController.currentUser,
+      (user) {
+        _scheduleSanctionNotice(user);
+      },
+    );
+
+    unawaited(_runStartupGuard());
+  }
+
+  @override
+  void dispose() {
+    _sanctionNoticeWorker?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _runStartupGuard() async {
+    if (_startupGuardStarted) return;
+    _startupGuardStarted = true;
+
+    AppUser? restoredUser;
+
+    try {
+      await SchedulerBinding.instance.endOfFrame;
+      restoredUser = await authController.restoreCurrentUserForStartup();
+    } catch (_) {
+      restoredUser = null;
+    }
+
+    if (!mounted) {
+      _removeNativeSplashSafely();
+      return;
+    }
+
+    final normalizedIndex = _normalizedInitialTabIndex(restoredUser);
+    final shouldOpenProfileSetup = _shouldOpenProfileSetup(restoredUser);
+
+    setState(() {
+      index = normalizedIndex;
+      _ensurePagesCreated();
+      _startupReady = true;
+    });
+
+    _scheduleSanctionNotice(restoredUser);
+
+    await _removeNativeSplashAfterFirstFrame();
+
+    if (shouldOpenProfileSetup) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Get.toNamed(AppRoutes.profileSetup);
+      });
+    }
+
+    _scheduleHomeStartupRefresh();
+  }
+
+  void _ensurePagesCreated() {
+    if (_pagesCreated) return;
+
+    pages = <Widget>[
+      const HomeScreen(),
+      const CommunityShell(),
+      const HarugyeolScreen(),
+      const my_store_screen.MyStoreScreen(),
+    ];
+
+    _pagesCreated = true;
+  }
+
+  int _normalizedInitialTabIndex(AppUser? user) {
+    if (!_isProtectedTab(index)) {
+      return index;
+    }
+
+    if (user == null) {
+      return homeTabIndex;
+    }
+
+    if (user.needsProfileSetup) {
+      return homeTabIndex;
+    }
+
+    return index;
+  }
+
+  bool _shouldOpenProfileSetup(AppUser? user) {
+    if (!_isProtectedTab(index)) return false;
+    if (user == null) return false;
+    return user.needsProfileSetup;
+  }
+
+  Future<void> _removeNativeSplashAfterFirstFrame() async {
+    if (_nativeSplashRemoved) return;
+    _nativeSplashRemoved = true;
+
+    try {
+      await SchedulerBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 16));
+      FlutterNativeSplash.remove();
+    } catch (_) {
+      FlutterNativeSplash.remove();
+    }
+  }
+
+  void _removeNativeSplashSafely() {
+    if (_nativeSplashRemoved) return;
+    _nativeSplashRemoved = true;
+
+    try {
+      FlutterNativeSplash.remove();
+    } catch (_) {}
+  }
+
+  void _scheduleHomeStartupRefresh() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (index != homeTabIndex) return;
+
+      _softRefreshHomeIfAllowed(force: true);
+    });
+  }
+
+  bool _isPublicTab(int tabIndex) {
+    return tabIndex == homeTabIndex ||
+        tabIndex == communityTabIndex ||
+        tabIndex == harugyeolTabIndex;
+  }
+
+  bool _isProtectedTab(int tabIndex) {
+    return tabIndex == myStoreTabIndex;
+  }
+
+  void _handleTap(int nextIndex) {
+    if (!_startupReady) return;
+
+    final user = authController.currentUser.value;
+
+    if (_isPublicTab(nextIndex)) {
+      if (index == nextIndex) {
+        if (nextIndex == homeTabIndex) {
+          _softRefreshHomeIfAllowed();
+        }
+        return;
+      }
+
+      setState(() {
+        index = nextIndex;
+      });
+
+      if (nextIndex == homeTabIndex) {
+        _softRefreshHomeIfAllowed();
+      }
+
+      return;
+    }
+
+    if (_isProtectedTab(nextIndex) && user == null) {
+      Get.toNamed(AppRoutes.login);
+      return;
+    }
+
+    if (_isProtectedTab(nextIndex) && user != null && user.needsProfileSetup) {
+      Get.toNamed(AppRoutes.profileSetup);
+      return;
+    }
+
+    if (index == nextIndex) {
+      if (nextIndex == homeTabIndex) {
+        _softRefreshHomeIfAllowed();
+      }
+      return;
+    }
+
+    setState(() {
+      index = nextIndex;
+    });
+
+    if (nextIndex == homeTabIndex) {
+      _softRefreshHomeIfAllowed();
+    }
+  }
+
+  void _softRefreshHomeIfAllowed({
+    bool force = false,
+  }) {
+    if (!Get.isRegistered<HomeFeedController>()) return;
+
+    final now = DateTime.now();
+    final last = _lastHomeSoftRefreshAt;
+
+    if (!force &&
+        last != null &&
+        now.difference(last) < _homeSoftRefreshCooldown) {
+      return;
+    }
+
+    _lastHomeSoftRefreshAt = now;
+
+    unawaited(
+      Get.find<HomeFeedController>().refreshIfStale(force: force),
+    );
+  }
+
+  void _scheduleSanctionNotice(AppUser? user) {
+    if (!mounted) return;
+    if (user == null) return;
+    if (user.needsProfileSetup) return;
+
+    final key = _sanctionNoticeKey(user);
+    if (key == null) return;
+    if (key == _lastPresentedSanctionNoticeKey) return;
+    if (key == _lastAcknowledgedWarningNoticeKey) return;
+
+    _lastPresentedSanctionNoticeKey = key;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_showSanctionNoticeIfNeeded(user, key));
+    });
+  }
+
+  String? _sanctionNoticeKey(AppUser user) {
+    final updatedAtMs = user.sanctionUpdatedAt?.millisecondsSinceEpoch ?? 0;
+    final untilMs = user.sanctionUntil?.millisecondsSinceEpoch ?? 0;
+    final sanctionId = user.lastSanctionId ?? '';
+
+    if (user.isPermanentlyBanned) {
+      return 'permanent:${user.userId}:$sanctionId:$updatedAtMs';
+    }
+
+    if (user.isCurrentlySuspendedBySanction) {
+      return 'suspended:${user.userId}:$sanctionId:$updatedAtMs:$untilMs';
+    }
+
+    if (user.shouldShowWarningNotice) {
+      return 'warning:${user.userId}:$sanctionId:$updatedAtMs';
+    }
+
+    return null;
+  }
+
+  Future<void> _showSanctionNoticeIfNeeded(
+    AppUser user,
+    String scheduledKey,
+  ) async {
+    if (_sanctionNoticeOpen) return;
+    if (!mounted) return;
+
+    final latestUser = authController.currentUser.value;
+    if (latestUser == null || latestUser.userId != user.userId) return;
+
+    final latestKey = _sanctionNoticeKey(latestUser);
+    if (latestKey == null) return;
+    if (latestKey != scheduledKey) return;
+    if (latestKey == _lastAcknowledgedWarningNoticeKey) return;
+
+    _sanctionNoticeOpen = true;
+
+    try {
+      if (latestUser.isPermanentlyBanned) {
+        await _showSanctionDialog(
+          title: '커뮤니티 이용 제한',
+          message: '운영정책 위반으로 커뮤니티 이용이 제한되었습니다.\n\n'
+              '사유: ${latestUser.sanctionDisplayReason}\n\n'
+              '문의가 필요한 경우 내가게의 의견함을 이용해주세요.',
+          confirmText: '확인',
+          isDanger: true,
+          barrierDismissible: false,
+        );
+        return;
+      }
+
+      if (latestUser.isCurrentlySuspendedBySanction) {
+        await _showSanctionDialog(
+          title: '커뮤니티 이용 정지',
+          message: '정지 기간 중에는 글쓰기, 댓글, 좋아요, 신고 기능을 이용할 수 없습니다.\n\n'
+              '사유: ${latestUser.sanctionDisplayReason}\n'
+              '해제 예정: ${latestUser.sanctionUntilLabel}',
+          confirmText: '확인',
+          isDanger: true,
+          barrierDismissible: false,
+        );
+        return;
+      }
+
+      if (latestUser.shouldShowWarningNotice) {
+        final acknowledged = await _showSanctionDialog(
+          title: '운영정책 경고',
+          message: '작성한 글 또는 댓글이 운영정책에 맞지 않아 경고가 부여되었습니다.\n\n'
+              '사유: ${latestUser.sanctionDisplayReason}\n\n'
+              '반복될 경우 일정 기간 커뮤니티 이용이 제한될 수 있습니다.',
+          confirmText: '확인했습니다',
+          isDanger: false,
+          barrierDismissible: false,
+        );
+
+        if (acknowledged == true) {
+          try {
+            _lastAcknowledgedWarningNoticeKey = latestKey;
+            await authController.acknowledgeLatestWarning();
+          } catch (e) {
+            _lastAcknowledgedWarningNoticeKey = null;
+            AppToast.show(
+              '$e',
+              title: '경고 확인 처리 실패',
+              isError: true,
+            );
+          }
+        }
+      }
+    } finally {
+      _sanctionNoticeOpen = false;
+    }
+  }
+
+  Future<bool> _showSanctionDialog({
+    required String title,
+    required String message,
+    required String confirmText,
+    required bool isDanger,
+    required bool barrierDismissible,
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: barrierDismissible,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+          contentPadding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+          actionsPadding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+          title: Text(
+            title,
+            style: const TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF25211F),
+              letterSpacing: -0.3,
+            ),
+          ),
+          content: Text(
+            message,
+            style: const TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF4B5563),
+              height: 1.5,
+              letterSpacing: -0.15,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(
+                confirmText,
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  color: isDanger
+                      ? const Color(0xFFE11D48)
+                      : kYupgagaeAccent,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result == true;
+  }
+
+  Widget _buildStartupBody() {
+    return const ColoredBox(
+      color: _backgroundColor,
+      child: Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.2,
+            color: kYupgagaeAccent,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHomeIcon({required bool active}) {
+    return Icon(
+      active ? Icons.home_rounded : Icons.home_outlined,
+      size: active ? 28 : 25,
+    );
+  }
+
+  Widget _buildStoreIcon({required bool active}) {
+    return Obx(() {
+      final unread = myStoreController.unreadNotificationCount;
+
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Icon(
+            active ? Icons.storefront : Icons.storefront_outlined,
+          ),
+          if (unread > 0)
+            Positioned(
+              right: -4,
+              top: -2,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 5,
+                  vertical: 1,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.red,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                constraints: const BoxConstraints(
+                  minWidth: 16,
+                  minHeight: 14,
+                ),
+                child: Text(
+                  unread > 99 ? '99+' : '$unread',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w800,
+                    height: 1.1,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_startupReady || !_pagesCreated) {
+      return Scaffold(
+        backgroundColor: _backgroundColor,
+        body: _buildStartupBody(),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: _backgroundColor,
+      body: ColoredBox(
+        color: _backgroundColor,
+        child: IndexedStack(
+          index: index,
+          children: pages,
+        ),
+      ),
+      bottomNavigationBar: DecoratedBox(
+        decoration: const BoxDecoration(
+          color: _backgroundColor,
+          border: Border(
+            top: BorderSide(
+              color: Color(0xFFF1F3F5),
+              width: 1,
+            ),
+          ),
+        ),
+        child: Theme(
+          data: Theme.of(context).copyWith(
+            splashColor: Colors.transparent,
+            highlightColor: Colors.transparent,
+          ),
+          child: BottomNavigationBar(
+            currentIndex: index,
+            onTap: _handleTap,
+            type: BottomNavigationBarType.fixed,
+            backgroundColor: _backgroundColor,
+            elevation: 0,
+            selectedFontSize: 11,
+            unselectedFontSize: 11,
+            selectedItemColor: kYupgagaeAccent,
+            unselectedItemColor: _inactiveTabColor,
+            selectedLabelStyle: const TextStyle(
+              fontWeight: FontWeight.w800,
+              height: 1.2,
+            ),
+            unselectedLabelStyle: const TextStyle(
+              fontWeight: FontWeight.w700,
+              height: 1.2,
+            ),
+            items: [
+              BottomNavigationBarItem(
+                icon: _buildHomeIcon(active: false),
+                activeIcon: _buildHomeIcon(active: true),
+                label: '홈',
+              ),
+              const BottomNavigationBarItem(
+                icon: Icon(Icons.forum_outlined),
+                activeIcon: Icon(Icons.forum),
+                label: '커뮤니티',
+              ),
+              const BottomNavigationBarItem(
+                icon: Icon(Icons.insights_outlined),
+                activeIcon: Icon(Icons.insights),
+                label: '하루결',
+              ),
+              BottomNavigationBarItem(
+                icon: _buildStoreIcon(active: false),
+                activeIcon: _buildStoreIcon(active: true),
+                label: '내가게',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// END_OF_FILE: lib/root_shell.dart
+
+================================================
+FILE_PATH: lib/features/home/home_screen.dart
+================================================
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/auth_action_guard.dart';
+import 'package:yupgagae/features/admin/domain/admin_notice.dart';
+import 'package:yupgagae/features/community/controller/home_feed_controller.dart';
+import 'package:yupgagae/features/community/domain/post.dart';
+import 'package:yupgagae/features/community/view/open_post_detail.dart';
+import 'package:yupgagae/features/community/view/widgets/post_row.dart';
+import 'package:yupgagae/features/home/widgets/home_top_bars.dart';
+
+enum HomeTab { hot, latest, owner }
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  static const Color _kYupgagaePrimary = Color(0xFFA56E5F);
+  static const Color _kYupgagaePrimarySoft = Color(0xFFF6EEEA);
+  static const Color _kTabTrackColor = Color(0xFFF8F6F5);
+  static const Color _kTabTrackBorder = Color(0xFFEFE8E4);
+
+  late final HomeFeedController controller;
+  late final ScrollController _scrollController;
+
+  final Rx<HomeTab> tab = HomeTab.hot.obs;
+
+  @override
+  void initState() {
+    super.initState();
+    controller = Get.find<HomeFeedController>();
+    _scrollController = ScrollController()..addListener(_handleScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_handleScroll)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _handleScroll() {
+    if (!_scrollController.hasClients) return;
+
+    final position = _scrollController.position;
+    if (position.pixels < position.maxScrollExtent - 320) return;
+
+    switch (tab.value) {
+      case HomeTab.hot:
+      case HomeTab.latest:
+        controller.loadMoreLatest();
+        break;
+      case HomeTab.owner:
+        controller.loadMoreOwnerLatest();
+        break;
+    }
+  }
+
+  String _timeLabel(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+
+    if (diff.inMinutes < 1) return '방금';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}분 전';
+    if (diff.inHours < 24) return '${diff.inHours}시간 전';
+    return '${diff.inDays}일 전';
+  }
+
+  Future<void> _goToPost(String postId) async {
+    final result = await openPostDetail<bool>(postId);
+    if (result == true) {
+      await controller.loadAll();
+    }
+  }
+
+  Future<void> _handleLike(Post post) async {
+    final allowed = await AuthActionGuard.ensureParticipationAllowed(
+      title: '로그인이 필요한 기능입니다',
+      message: '로그인 후 좋아요를 이용할 수 있어요.',
+    );
+
+    if (!allowed) return;
+
+    await controller.toggleLike(post);
+  }
+
+  Future<void> _showNoticeDialog(AdminNotice notice) async {
+    final title = notice.title.trim();
+    final body = notice.body.trim();
+
+    if (title.isEmpty && body.isEmpty) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+          contentPadding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+          actionsPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          title: Text(
+            title.isEmpty ? '공지' : title,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF25211F),
+              letterSpacing: -0.35,
+            ),
+          ),
+          content: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(ctx).size.height * 0.48,
+            ),
+            child: SingleChildScrollView(
+              child: Text(
+                body.isEmpty ? '공지 내용이 없습니다.' : body,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  height: 1.55,
+                  color: Color(0xFF4B5563),
+                  letterSpacing: -0.2,
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              style: TextButton.styleFrom(
+                foregroundColor: _kYupgagaePrimary,
+              ),
+              child: const Text(
+                '확인',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildPosts(List<Post> posts) {
+    if (posts.isEmpty) {
+      return const _EmptyBox(message: '아직 글이 없습니다.');
+    }
+
+    return ListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: posts.length,
+      itemBuilder: (context, i) {
+        final post = posts[i];
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            PostRow(
+              post: post,
+              timeLabel: _timeLabel(post.createdAt),
+              onTap: () => _goToPost(post.id),
+              onLike: () => _handleLike(post),
+              liked: post.likedUserIds.contains(controller.currentUserId),
+            ),
+            if (i != posts.length - 1)
+              const Padding(
+                padding: EdgeInsets.only(left: 16),
+                child: Divider(
+                  height: 1,
+                  thickness: 1,
+                  color: Color(0xFFF1F3F5),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildLoadingMore({
+    required bool show,
+  }) {
+    if (!show) return const SizedBox.shrink();
+
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 18),
+      child: Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2.2),
+        ),
+      ),
+    );
+  }
+
+  Widget _longDivider(String text) {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Divider(
+              height: 1,
+              thickness: 1,
+              color: Color(0xFFE5E7EB),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF6B7280),
+                letterSpacing: -0.1,
+              ),
+            ),
+          ),
+          const Expanded(
+            child: Divider(
+              height: 1,
+              thickness: 1,
+              color: Color(0xFFE5E7EB),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMixedFeed() {
+    final hot = controller.hot;
+    final latest = controller.latest;
+
+    if (hot.isEmpty && latest.isEmpty) {
+      return const _EmptyBox(message: '아직 글이 없습니다.');
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (hot.isNotEmpty) _buildPosts(hot),
+        if (hot.isNotEmpty && latest.isNotEmpty) _longDivider('최신글'),
+        if (latest.isNotEmpty) _buildPosts(latest),
+        _buildLoadingMore(show: controller.isLoadingMore.value),
+      ],
+    );
+  }
+
+  Widget _buildLatestOnlyFeed() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildPosts(controller.latest),
+        _buildLoadingMore(show: controller.isLoadingMore.value),
+      ],
+    );
+  }
+
+  Widget _buildOwnerFeed() {
+    if (!controller.isOwnerVerified.value) {
+      return const _LockedOwnerNotice();
+    }
+
+    final ownerHot = controller.ownerHot;
+    final ownerLatest = controller.ownerLatest;
+
+    if (ownerHot.isEmpty && ownerLatest.isEmpty) {
+      return const _EmptyBox(message: '아직 글이 없습니다.');
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (ownerHot.isNotEmpty) _buildPosts(ownerHot),
+        if (ownerHot.isNotEmpty && ownerLatest.isNotEmpty) _longDivider('최신글'),
+        if (ownerLatest.isNotEmpty) _buildPosts(ownerLatest),
+        _buildLoadingMore(show: controller.isLoadingMoreOwner.value),
+      ],
+    );
+  }
+
+  Widget _buildTabFeed() {
+    switch (tab.value) {
+      case HomeTab.hot:
+        return _buildMixedFeed();
+      case HomeTab.latest:
+        return _buildLatestOnlyFeed();
+      case HomeTab.owner:
+        return _buildOwnerFeed();
+    }
+  }
+
+  Widget _buildTabs() {
+    return Obx(() {
+      return Container(
+        color: Colors.white,
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+        child: Container(
+          height: 50,
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          decoration: BoxDecoration(
+            color: _kTabTrackColor,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: _kTabTrackBorder),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: _MinimalTab(
+                  label: '인기글',
+                  selected: tab.value == HomeTab.hot,
+                  onTap: () => tab.value = HomeTab.hot,
+                  selectedColor: _kYupgagaePrimary,
+                  selectedSoftColor: _kYupgagaePrimarySoft,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: _MinimalTab(
+                  label: '최신글',
+                  selected: tab.value == HomeTab.latest,
+                  onTap: () => tab.value = HomeTab.latest,
+                  selectedColor: _kYupgagaePrimary,
+                  selectedSoftColor: _kYupgagaePrimarySoft,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: _MinimalTab(
+                  label: '사장님',
+                  selected: tab.value == HomeTab.owner,
+                  onTap: () => tab.value = HomeTab.owner,
+                  selectedColor: _kYupgagaePrimary,
+                  selectedSoftColor: _kYupgagaePrimarySoft,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    });
+  }
+
+  Widget _buildTopBars() {
+    return Obx(() {
+      final notice = controller.latestNotice.value;
+      final title = notice?.title.trim() ?? '';
+      final text = title.isEmpty ? '새 기능과 개선사항은 곧 반영됩니다.' : title;
+
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: notice == null ? null : () => _showNoticeDialog(notice),
+            borderRadius: BorderRadius.circular(14),
+            splashFactory: NoSplash.splashFactory,
+            splashColor: Colors.transparent,
+            highlightColor: Colors.transparent,
+            child: HomeTopNoticeBar(
+              text: text,
+            ),
+          ),
+        ),
+      );
+    });
+  }
+
+  Widget _buildFeedSection() {
+    return Obx(() {
+      final hotPosts = controller.hot;
+      final latestPosts = controller.latest;
+      final ownerHotPosts = controller.ownerHot;
+      final ownerLatestPosts = controller.ownerLatest;
+
+      final hasAnyVisiblePost = hotPosts.isNotEmpty ||
+          latestPosts.isNotEmpty ||
+          ownerHotPosts.isNotEmpty ||
+          ownerLatestPosts.isNotEmpty;
+
+      final showInitialLoading =
+          controller.shouldShowInitialLoading && !hasAnyVisiblePost;
+
+      final showTopLoading = controller.isLoadingTop.value &&
+          hotPosts.isEmpty &&
+          latestPosts.isEmpty;
+      final showLatestLoading =
+          controller.isLoadingLatest.value && latestPosts.isEmpty;
+      final showOwnerLatestLoading =
+          controller.isLoadingOwnerLatest.value &&
+              ownerHotPosts.isEmpty &&
+              ownerLatestPosts.isEmpty;
+
+      final showError = controller.error.value != null &&
+          controller.hasTriedInitialLoad &&
+          !hasAnyVisiblePost;
+
+      if (showInitialLoading) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+
+      if (showError) {
+        return const Padding(
+          padding: EdgeInsets.only(top: 12),
+          child: _MessageBox(
+            icon: Icons.error_outline_rounded,
+            message: '홈 글을 불러오지 못했습니다.\n잠시 후 다시 시도해주세요.',
+          ),
+        );
+      }
+
+      if (tab.value == HomeTab.hot && showTopLoading) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+
+      if (tab.value == HomeTab.latest && showLatestLoading) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+
+      if (tab.value == HomeTab.owner &&
+          controller.isOwnerVerified.value &&
+          showOwnerLatestLoading) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+
+      return _buildTabFeed();
+    });
+  }
+
+  Widget _buildBody() {
+    return RefreshIndicator(
+      onRefresh: controller.loadAll,
+      child: ListView(
+        controller: _scrollController,
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: ClampingScrollPhysics(),
+        ),
+        children: [
+          _buildTopBars(),
+          _buildTabs(),
+          _buildFeedSection(),
+          const SizedBox(height: 24),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF9FAFB),
+      appBar: AppBar(
+        toolbarHeight: 0,
+        elevation: 0,
+        backgroundColor: Colors.white,
+      ),
+      body: _buildBody(),
+    );
+  }
+}
+
+class _MinimalTab extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final Color selectedColor;
+  final Color selectedSoftColor;
+
+  const _MinimalTab({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    required this.selectedColor,
+    required this.selectedSoftColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final textColor = selected ? selectedColor : const Color(0xFF7D7772);
+    final backgroundColor = selected ? selectedSoftColor : Colors.transparent;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        splashFactory: NoSplash.splashFactory,
+        splashColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+        hoverColor: Colors.transparent,
+        focusColor: Colors.transparent,
+        overlayColor: WidgetStateProperty.all(Colors.transparent),
+        child: Container(
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: backgroundColor,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: selected ? FontWeight.w800 : FontWeight.w700,
+              color: textColor,
+              letterSpacing: -0.1,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyBox extends StatelessWidget {
+  final String message;
+
+  const _EmptyBox({
+    required this.message,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      child: Text(
+        message,
+        style: const TextStyle(
+          fontSize: 13,
+          color: Color(0xFF6B7280),
+          fontWeight: FontWeight.w500,
+          height: 1.5,
+        ),
+      ),
+    );
+  }
+}
+
+class _MessageBox extends StatelessWidget {
+  final IconData icon;
+  final String message;
+
+  const _MessageBox({
+    required this.icon,
+    required this.message,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            icon,
+            size: 18,
+            color: const Color(0xFF9CA3AF),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                fontSize: 13,
+                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w500,
+                height: 1.5,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LockedOwnerNotice extends StatelessWidget {
+  const _LockedOwnerNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      child: Row(
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: const Color(0xFFE5E7EB)),
+            ),
+            child: const Icon(
+              Icons.lock_outline_rounded,
+              size: 16,
+              color: Color(0xFF6B7280),
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              '사업자 인증 사용자만 열람 가능합니다.',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF374151),
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// END_OF_FILE: lib/features/home/home_screen.dart
+
+================================================
+FILE_PATH: lib/features/community/controller/home_feed_controller.dart
+================================================
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/auth_controller.dart';
+import 'package:yupgagae/core/auth/auth_session_service.dart';
+import 'package:yupgagae/core/auth/permission_policy.dart';
+import 'package:yupgagae/features/admin/domain/admin_notice.dart';
+import 'package:yupgagae/features/admin/domain/admin_notice_repository.dart';
+import 'package:yupgagae/features/community/domain/post.dart';
+import 'package:yupgagae/features/community/domain/post_page.dart';
+import 'package:yupgagae/features/community/domain/post_repository.dart';
+import 'package:yupgagae/features/my_store/domain/store_profile_repository.dart';
+
+class HomeFeedController extends GetxController {
+  final PostRepository repo;
+  final AuthSessionService auth;
+  final AuthController authController;
+  final StoreProfileRepository storeProfileRepo;
+  final AdminNoticeRepository noticeRepo;
+
+  HomeFeedController({
+    required this.repo,
+    required this.auth,
+    required this.authController,
+    required this.storeProfileRepo,
+    AdminNoticeRepository? noticeRepo,
+  }) : noticeRepo = noticeRepo ?? FirebaseAdminNoticeRepository();
+
+  final hot = <Post>[].obs;
+  final mostCommented = <Post>[].obs;
+  final ownerHot = <Post>[].obs;
+  final latest = <Post>[].obs;
+  final usedLatest = <Post>[].obs;
+  final ownerLatest = <Post>[].obs;
+
+  final latestNotice = Rxn<AdminNotice>();
+  final isNoticeLoading = false.obs;
+  final noticeError = RxnString();
+
+  final isOwnerVerified = false.obs;
+
+  String? _cursor;
+  String? _usedCursor;
+  String? _ownerCursor;
+
+  final hasMore = true.obs;
+  final hasMoreUsed = true.obs;
+  final hasMoreOwner = true.obs;
+
+  final isLoadingTop = false.obs;
+  final isLoadingLatest = false.obs;
+  final isLoadingUsedLatest = false.obs;
+  final isLoadingOwnerLatest = false.obs;
+  final isLoadingMore = false.obs;
+  final isLoadingMoreUsed = false.obs;
+  final isLoadingMoreOwner = false.obs;
+
+  final error = RxnString();
+
+  final hasCompletedInitialLoad = false.obs;
+  final isInitialLoading = true.obs;
+
+  Future<void>? _loadAllFuture;
+  StreamSubscription<AdminNotice?>? _noticeSubscription;
+
+  DateTime? _lastFullLoadAt;
+
+  late final Worker _ownerVerificationWorker;
+
+  int _loadGeneration = 0;
+
+  final Set<String> _blockedAuthorIds = <String>{};
+
+  static const int topLimit = 5;
+  static const int latestLimit = 20;
+
+  static const int _topWindowHours = 72;
+  static const int _hotLikeWeight = 3;
+  static const int _hotCommentWeight = 4;
+
+  static const Duration _staleAfter = Duration(seconds: 30);
+  static const Duration _feedLoadTimeout = Duration(seconds: 12);
+
+  bool get _canReadFeed {
+    return true;
+  }
+
+  bool get _hasParticipationUser {
+    final user = authController.currentUser.value;
+    if (user == null) return false;
+
+    final userId = user.userId.trim();
+    if (userId.isEmpty) return false;
+
+    if (user.needsProfileSetup) return false;
+    if (user.isWithdrawn) return false;
+
+    return PermissionPolicy.canParticipate(user);
+  }
+
+  String get currentUserId {
+    final user = authController.currentUser.value;
+    if (user == null) return '';
+
+    final userId = user.userId.trim();
+    return userId;
+  }
+
+  bool get hasAnyContent {
+    return hot.isNotEmpty ||
+        mostCommented.isNotEmpty ||
+        ownerHot.isNotEmpty ||
+        latest.isNotEmpty ||
+        usedLatest.isNotEmpty ||
+        ownerLatest.isNotEmpty;
+  }
+
+  bool get isAnyLoading {
+    return isLoadingTop.value ||
+        isLoadingLatest.value ||
+        isLoadingUsedLatest.value ||
+        isLoadingOwnerLatest.value ||
+        isLoadingMore.value ||
+        isLoadingMoreUsed.value ||
+        isLoadingMoreOwner.value;
+  }
+
+  bool get shouldShowInitialLoading {
+    return isInitialLoading.value && !hasAnyContent;
+  }
+
+  bool get hasTriedInitialLoad {
+    return hasCompletedInitialLoad.value;
+  }
+
+  bool get canShowEmptyState {
+    return hasCompletedInitialLoad.value && !isInitialLoading.value;
+  }
+
+  bool get isStale {
+    final last = _lastFullLoadAt;
+    if (last == null) return true;
+
+    return DateTime.now().difference(last) >= _staleAfter;
+  }
+
+  void _ensureParticipationAllowed() {
+    final user = authController.currentUser.value;
+
+    if (!_hasParticipationUser) {
+      throw Exception(PermissionPolicy.participationBlockedMessage(user));
+    }
+  }
+
+  @override
+  void onInit() {
+    super.onInit();
+
+    refreshOwnerVerification();
+
+    _ownerVerificationWorker = ever(
+      authController.currentUser,
+      (_) {
+        refreshOwnerVerification();
+        _handleAuthUserChanged();
+      },
+    );
+
+    unawaited(loadAll());
+    _watchLatestNotice();
+  }
+
+  @override
+  void onClose() {
+    _noticeSubscription?.cancel();
+    _ownerVerificationWorker.dispose();
+    _invalidateLoad();
+    _loadAllFuture = null;
+    super.onClose();
+  }
+
+  Future<void> loadAll() {
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return Future<void>.value();
+    }
+
+    final running = _loadAllFuture;
+    if (running != null) {
+      return running;
+    }
+
+    if (!hasCompletedInitialLoad.value && !hasAnyContent) {
+      isInitialLoading.value = true;
+    }
+
+    final future = _doLoadAll().whenComplete(() {
+      _loadAllFuture = null;
+    });
+
+    _loadAllFuture = future;
+    return future;
+  }
+
+  Future<void> refreshIfStale({
+    bool force = false,
+  }) async {
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    final running = _loadAllFuture;
+    if (running != null) {
+      await running.timeout(
+        _feedLoadTimeout,
+        onTimeout: () async {},
+      );
+
+      if (!force && hasAnyContent && !isStale) {
+        return;
+      }
+    }
+
+    if (!force && hasAnyContent && !isStale) {
+      return;
+    }
+
+    await loadAll();
+  }
+
+  Future<void> refreshAll() async {
+    await refreshIfStale(force: true);
+  }
+
+  void _watchLatestNotice() {
+    isNoticeLoading.value = true;
+    noticeError.value = null;
+
+    _noticeSubscription?.cancel();
+    _noticeSubscription = noticeRepo.watchLatestVisibleNotice().listen(
+      (notice) {
+        latestNotice.value = notice;
+        isNoticeLoading.value = false;
+        noticeError.value = null;
+      },
+      onError: (e) {
+        isNoticeLoading.value = false;
+        noticeError.value = e.toString();
+      },
+    );
+  }
+
+  Future<void> _doLoadAll() async {
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    final generation = ++_loadGeneration;
+    final wasInitialLoad = !hasCompletedInitialLoad.value && !hasAnyContent;
+
+    if (wasInitialLoad) {
+      isInitialLoading.value = true;
+    }
+
+    error.value = null;
+
+    try {
+      refreshOwnerVerification();
+      await _loadBlockedAuthorIds();
+
+      await Future.wait<void>([
+        loadTop(generation: generation),
+        refreshLatest(generation: generation),
+        refreshUsedLatest(generation: generation),
+        refreshOwnerLatest(generation: generation),
+      ]).timeout(_feedLoadTimeout);
+
+      if (_isCurrentGeneration(generation) && _canReadFeed) {
+        _lastFullLoadAt = DateTime.now();
+      }
+    } on TimeoutException {
+      if (_isCurrentGeneration(generation) && _canReadFeed) {
+        error.value = '홈 글을 불러오는 시간이 길어지고 있습니다.';
+      }
+    } catch (e) {
+      if (_isCurrentGeneration(generation) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(generation) && _canReadFeed) {
+        _clearPrimaryLoadingFlags();
+        hasCompletedInitialLoad.value = true;
+        isInitialLoading.value = false;
+      }
+    }
+  }
+
+  Future<void> _loadBlockedAuthorIds() async {
+    try {
+      final blockedUsers = await storeProfileRepo.getBlockedUsers();
+
+      _blockedAuthorIds
+        ..clear()
+        ..addAll(
+          blockedUsers
+              .map((e) => e.userId.trim())
+              .where((e) => e.isNotEmpty),
+        );
+    } catch (_) {
+      _blockedAuthorIds.clear();
+    }
+  }
+
+  void refreshOwnerVerification() {
+    isOwnerVerified.value =
+        authController.currentUser.value?.isBusinessVerified ?? false;
+  }
+
+  Future<void> loadTop({
+    int? generation,
+  }) async {
+    if (isLoadingTop.value) return;
+
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    final requestGeneration = generation ?? _loadGeneration;
+
+    isLoadingTop.value = true;
+    error.value = null;
+
+    try {
+      if (generation == null) {
+        await _loadBlockedAuthorIds();
+      }
+
+      final allPosts = await repo.fetchHomeTopPosts(limit: 100);
+
+      if (!_isCurrentGeneration(requestGeneration) || !_canReadFeed) {
+        return;
+      }
+
+      final visiblePosts = _filterBlockedPosts(allPosts);
+      final recentPosts = _filterRecentPosts(visiblePosts);
+
+      final recentFreePosts =
+          recentPosts.where((p) => p.boardType == BoardType.free).toList();
+
+      final recentOwnerPosts =
+          recentPosts.where((p) => p.boardType == BoardType.owner).toList();
+
+      final hotList = List<Post>.from(recentFreePosts)..sort(_compareHotPosts);
+      final mostCommentedList = List<Post>.from(recentFreePosts)
+        ..sort(_compareMostCommentedPosts);
+      final ownerHotList = List<Post>.from(recentOwnerPosts)
+        ..sort(_compareHotPosts);
+
+      hot.assignAll(_dedupeById(hotList.take(topLimit).toList()));
+      mostCommented.assignAll(
+        _dedupeById(mostCommentedList.take(topLimit).toList()),
+      );
+      ownerHot.assignAll(_dedupeById(ownerHotList.take(topLimit).toList()));
+
+      _debugLoadTop(
+        allPosts: allPosts,
+        recentFreePosts: recentFreePosts,
+        recentOwnerPosts: recentOwnerPosts,
+      );
+    } catch (e) {
+      if (_isCurrentGeneration(requestGeneration) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(requestGeneration)) {
+        isLoadingTop.value = false;
+      }
+    }
+  }
+
+  Future<void> refreshLatest({
+    int? generation,
+  }) async {
+    if (isLoadingLatest.value) return;
+
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    final requestGeneration = generation ?? _loadGeneration;
+
+    isLoadingLatest.value = true;
+    error.value = null;
+
+    try {
+      if (generation == null) {
+        await _loadBlockedAuthorIds();
+      }
+
+      final page = await repo.fetchLatestPage(
+        cursor: null,
+        limit: latestLimit,
+        boardType: BoardType.free,
+      );
+
+      if (!_isCurrentGeneration(requestGeneration) || !_canReadFeed) {
+        return;
+      }
+
+      latest.assignAll(_dedupeById(_filterBlockedPosts(page.items)));
+      _cursor = page.nextCursor;
+      hasMore.value = page.nextCursor != null;
+    } catch (e) {
+      if (_isCurrentGeneration(requestGeneration) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(requestGeneration)) {
+        isLoadingLatest.value = false;
+      }
+    }
+  }
+
+  Future<void> refreshUsedLatest({
+    int? generation,
+  }) async {
+    if (isLoadingUsedLatest.value) return;
+
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    final requestGeneration = generation ?? _loadGeneration;
+
+    isLoadingUsedLatest.value = true;
+    error.value = null;
+
+    try {
+      if (generation == null) {
+        await _loadBlockedAuthorIds();
+      }
+
+      final page = await repo.fetchLatestPage(
+        cursor: null,
+        limit: latestLimit,
+        boardType: BoardType.used,
+      );
+
+      if (!_isCurrentGeneration(requestGeneration) || !_canReadFeed) {
+        return;
+      }
+
+      usedLatest.assignAll(_dedupeById(_filterBlockedPosts(page.items)));
+      _usedCursor = page.nextCursor;
+      hasMoreUsed.value = page.nextCursor != null;
+    } catch (e) {
+      if (_isCurrentGeneration(requestGeneration) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(requestGeneration)) {
+        isLoadingUsedLatest.value = false;
+      }
+    }
+  }
+
+  Future<void> refreshOwnerLatest({
+    int? generation,
+  }) async {
+    if (isLoadingOwnerLatest.value) return;
+
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    final requestGeneration = generation ?? _loadGeneration;
+
+    isLoadingOwnerLatest.value = true;
+    error.value = null;
+
+    try {
+      if (generation == null) {
+        await _loadBlockedAuthorIds();
+      }
+
+      final page = await repo.fetchLatestPage(
+        cursor: null,
+        limit: latestLimit,
+        boardType: BoardType.owner,
+      );
+
+      if (!_isCurrentGeneration(requestGeneration) || !_canReadFeed) {
+        return;
+      }
+
+      ownerLatest.assignAll(_dedupeById(_filterBlockedPosts(page.items)));
+      _ownerCursor = page.nextCursor;
+      hasMoreOwner.value = page.nextCursor != null;
+    } catch (e) {
+      if (_isCurrentGeneration(requestGeneration) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(requestGeneration)) {
+        isLoadingOwnerLatest.value = false;
+      }
+    }
+  }
+
+  Future<void> loadMoreLatest() async {
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    if (isLoadingMore.value || !hasMore.value) return;
+
+    isLoadingMore.value = true;
+    error.value = null;
+
+    final requestGeneration = _loadGeneration;
+
+    try {
+      final page = await repo.fetchLatestPage(
+        cursor: _cursor,
+        limit: latestLimit,
+        boardType: BoardType.free,
+      );
+
+      if (!_isCurrentGeneration(requestGeneration) || !_canReadFeed) {
+        return;
+      }
+
+      _appendPage(
+        target: latest,
+        page: page,
+        setCursor: (cursor) => _cursor = cursor,
+        setHasMore: (value) => hasMore.value = value,
+      );
+    } catch (e) {
+      if (_isCurrentGeneration(requestGeneration) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(requestGeneration)) {
+        isLoadingMore.value = false;
+      }
+    }
+  }
+
+  Future<void> loadMoreUsedLatest() async {
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    if (isLoadingMoreUsed.value || !hasMoreUsed.value) return;
+
+    isLoadingMoreUsed.value = true;
+    error.value = null;
+
+    final requestGeneration = _loadGeneration;
+
+    try {
+      final page = await repo.fetchLatestPage(
+        cursor: _usedCursor,
+        limit: latestLimit,
+        boardType: BoardType.used,
+      );
+
+      if (!_isCurrentGeneration(requestGeneration) || !_canReadFeed) {
+        return;
+      }
+
+      _appendPage(
+        target: usedLatest,
+        page: page,
+        setCursor: (cursor) => _usedCursor = cursor,
+        setHasMore: (value) => hasMoreUsed.value = value,
+      );
+    } catch (e) {
+      if (_isCurrentGeneration(requestGeneration) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(requestGeneration)) {
+        isLoadingMoreUsed.value = false;
+      }
+    }
+  }
+
+  Future<void> loadMoreOwnerLatest() async {
+    if (!_canReadFeed) {
+      _resetFeedState();
+      return;
+    }
+
+    if (isLoadingMoreOwner.value || !hasMoreOwner.value) return;
+
+    isLoadingMoreOwner.value = true;
+    error.value = null;
+
+    final requestGeneration = _loadGeneration;
+
+    try {
+      final page = await repo.fetchLatestPage(
+        cursor: _ownerCursor,
+        limit: latestLimit,
+        boardType: BoardType.owner,
+      );
+
+      if (!_isCurrentGeneration(requestGeneration) || !_canReadFeed) {
+        return;
+      }
+
+      _appendPage(
+        target: ownerLatest,
+        page: page,
+        setCursor: (cursor) => _ownerCursor = cursor,
+        setHasMore: (value) => hasMoreOwner.value = value,
+      );
+    } catch (e) {
+      if (_isCurrentGeneration(requestGeneration) && _canReadFeed) {
+        error.value = e.toString();
+      }
+    } finally {
+      if (_isCurrentGeneration(requestGeneration)) {
+        isLoadingMoreOwner.value = false;
+      }
+    }
+  }
+
+  Future<void> toggleLike(Post post) async {
+    _ensureParticipationAllowed();
+
+    try {
+      final updated = await repo.toggleLike(
+        postId: post.id,
+      );
+
+      _replacePost(latest, updated);
+      _replacePost(usedLatest, updated);
+      _replacePost(ownerLatest, updated);
+      _replacePost(hot, updated);
+      _replacePost(mostCommented, updated);
+      _replacePost(ownerHot, updated);
+
+      _resortTopLists();
+    } catch (e) {
+      error.value = e.toString();
+      rethrow;
+    }
+  }
+
+  void _handleAuthUserChanged() {
+    _invalidateLoad();
+
+    _loadAllFuture = null;
+    _lastFullLoadAt = null;
+
+    _clearAllLoadingFlags();
+
+    _blockedAuthorIds.clear();
+
+    if (!hasAnyContent) {
+      hasCompletedInitialLoad.value = false;
+      isInitialLoading.value = true;
+    }
+
+    unawaited(loadAll());
+  }
+
+  void _resetFeedState() {
+    _loadAllFuture = null;
+    _lastFullLoadAt = null;
+
+    hot.clear();
+    mostCommented.clear();
+    ownerHot.clear();
+    latest.clear();
+    usedLatest.clear();
+    ownerLatest.clear();
+
+    _cursor = null;
+    _usedCursor = null;
+    _ownerCursor = null;
+
+    _blockedAuthorIds.clear();
+
+    hasMore.value = true;
+    hasMoreUsed.value = true;
+    hasMoreOwner.value = true;
+
+    _clearAllLoadingFlags();
+
+    error.value = null;
+
+    hasCompletedInitialLoad.value = false;
+    isInitialLoading.value = false;
+  }
+
+  void _clearPrimaryLoadingFlags() {
+    isLoadingTop.value = false;
+    isLoadingLatest.value = false;
+    isLoadingUsedLatest.value = false;
+    isLoadingOwnerLatest.value = false;
+  }
+
+  void _clearMoreLoadingFlags() {
+    isLoadingMore.value = false;
+    isLoadingMoreUsed.value = false;
+    isLoadingMoreOwner.value = false;
+  }
+
+  void _clearAllLoadingFlags() {
+    _clearPrimaryLoadingFlags();
+    _clearMoreLoadingFlags();
+  }
+
+  List<Post> _filterRecentPosts(List<Post> posts) {
+    final now = DateTime.now();
+    return posts.where((post) {
+      final diff = now.difference(post.createdAt);
+      return diff.inHours <= _topWindowHours;
+    }).toList();
+  }
+
+  List<Post> _filterBlockedPosts(List<Post> source) {
+    if (_blockedAuthorIds.isEmpty) {
+      return source;
+    }
+
+    return source.where((post) {
+      final authorId = post.authorId.trim();
+      if (authorId.isEmpty) return true;
+      return !_blockedAuthorIds.contains(authorId);
+    }).toList(growable: false);
+  }
+
+  bool _isBlockedPost(Post post) {
+    final authorId = post.authorId.trim();
+    if (authorId.isEmpty) return false;
+    return _blockedAuthorIds.contains(authorId);
+  }
+
+  int _compareHotPosts(Post a, Post b) {
+    final aScore =
+        (a.likeCount * _hotLikeWeight) + (a.commentCount * _hotCommentWeight);
+    final bScore =
+        (b.likeCount * _hotLikeWeight) + (b.commentCount * _hotCommentWeight);
+
+    final scoreCompare = bScore.compareTo(aScore);
+    if (scoreCompare != 0) return scoreCompare;
+
+    return b.createdAt.compareTo(a.createdAt);
+  }
+
+  int _compareMostCommentedPosts(Post a, Post b) {
+    final commentCompare = b.commentCount.compareTo(a.commentCount);
+    if (commentCompare != 0) return commentCompare;
+
+    return b.createdAt.compareTo(a.createdAt);
+  }
+
+  void _appendPage({
+    required RxList<Post> target,
+    required PostPage page,
+    required void Function(String? cursor) setCursor,
+    required void Function(bool hasMore) setHasMore,
+  }) {
+    final merged = <Post>[
+      ...target,
+      ..._filterBlockedPosts(page.items),
+    ];
+
+    target.assignAll(_dedupeById(merged));
+    setCursor(page.nextCursor);
+    setHasMore(page.nextCursor != null);
+  }
+
+  void _replacePost(RxList<Post> list, Post updated) {
+    if (_isBlockedPost(updated)) {
+      list.removeWhere((p) => p.id == updated.id);
+      return;
+    }
+
+    final index = list.indexWhere((p) => p.id == updated.id);
+    if (index != -1) {
+      list[index] = updated;
+    }
+  }
+
+  void _resortTopLists() {
+    final resortedHot = List<Post>.from(hot)..sort(_compareHotPosts);
+    final resortedMostCommented = List<Post>.from(mostCommented)
+      ..sort(_compareMostCommentedPosts);
+    final resortedOwnerHot = List<Post>.from(ownerHot)..sort(_compareHotPosts);
+
+    hot.assignAll(_dedupeById(resortedHot.take(topLimit).toList()));
+    mostCommented.assignAll(
+      _dedupeById(resortedMostCommented.take(topLimit).toList()),
+    );
+    ownerHot.assignAll(_dedupeById(resortedOwnerHot.take(topLimit).toList()));
+  }
+
+  List<Post> _dedupeById(List<Post> items) {
+    final seen = <String>{};
+    final result = <Post>[];
+
+    for (final item in items) {
+      if (_isBlockedPost(item)) continue;
+
+      if (seen.add(item.id)) {
+        result.add(item);
+      }
+    }
+
+    return result;
+  }
+
+  void _invalidateLoad() {
+    _loadGeneration++;
+  }
+
+  bool _isCurrentGeneration(int generation) {
+    return _loadGeneration == generation;
+  }
+
+  void _debugLoadTop({
+    required List<Post> allPosts,
+    required List<Post> recentFreePosts,
+    required List<Post> recentOwnerPosts,
+  }) {
+    if (!kDebugMode) return;
+
+    debugPrint('================ HOME loadTop DEBUG ================');
+    debugPrint('Total candidate posts: ${allPosts.length}');
+    debugPrint('Recent free posts (72h): ${recentFreePosts.length}');
+    debugPrint('Recent owner posts (72h): ${recentOwnerPosts.length}');
+    debugPrint('Assigned hot count: ${hot.length}');
+    debugPrint('Assigned comment count: ${mostCommented.length}');
+    debugPrint('Assigned owner hot count: ${ownerHot.length}');
+    debugPrint('Assigned used latest count: ${usedLatest.length}');
+    debugPrint('Assigned owner latest count: ${ownerLatest.length}');
+    debugPrint('====================================================');
+  }
+}
+
+// END_OF_FILE: lib/features/community/controller/home_feed_controller.dart
+
+================================================
+FILE_PATH: lib/features/harugyeol/controller/harugyeol_controller.dart
+================================================
+import 'dart:async';
+
+import 'package:get/get.dart';
+
+import 'package:yupgagae/core/auth/auth_controller.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_comment.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_day_summary.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_entry.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_enums.dart';
+import 'package:yupgagae/features/harugyeol/domain/harugyeol_repository.dart';
+
+enum HarugyeolEntryGateMode {
+  loading,
+  beforeInputTime,
+  loginRequired,
+  writeRequired,
+  partialResult,
+  fullResult,
+  pastLocked,
+}
+
+class HarugyeolController extends GetxController {
+  final HarugyeolRepository repo;
+  final AuthController authController;
+
+  HarugyeolController({
+    required this.repo,
+    required this.authController,
+  });
+
+  final selectedDateOffset = 0.obs;
+
+  final selectedMood = Rxn<HarugyeolMood>();
+  final selectedReasons = <HarugyeolReason>{}.obs;
+  final oneLineText = ''.obs;
+
+  final middayMood = Rxn<HarugyeolMood>();
+  final middayReasons = <HarugyeolReason>{}.obs;
+  final middayOneLineText = ''.obs;
+
+  final eveningMood = Rxn<HarugyeolMood>();
+  final eveningReasons = <HarugyeolReason>{}.obs;
+  final eveningOneLineText = ''.obs;
+
+  final summary = Rxn<HarugyeolDaySummary>();
+  final previousSummary = Rxn<HarugyeolDaySummary>();
+  final myEntries = <HarugyeolEntry>[].obs;
+  final comments = <HarugyeolComment>[].obs;
+  final topComments = <HarugyeolComment>[].obs;
+  final pendingLikeCommentIds = <String>{}.obs;
+
+  final Map<HarugyeolSlot, HarugyeolEntry> _optimisticEntriesBySlot = {};
+
+  final availableSlot = Rxn<HarugyeolSlot>();
+  final availableInputSlots = <HarugyeolSlot>[].obs;
+  final selectedInputSlot = Rxn<HarugyeolSlot>();
+  final requiredContinuationInputSlot = Rxn<HarugyeolSlot>();
+  final nowLabel = ''.obs;
+  final submitSuccessMessage = '하루결을 남겼어요.'.obs;
+
+  final isSubmitting = false.obs;
+  final isSummaryLoading = true.obs;
+  final isPreviousSummaryLoading = false.obs;
+  final isMyEntriesLoading = true.obs;
+  final isCommentsLoading = true.obs;
+  final errorMessage = RxnString();
+
+  StreamSubscription<HarugyeolDaySummary>? _summarySub;
+  StreamSubscription<HarugyeolDaySummary>? _previousSummarySub;
+  StreamSubscription<List<HarugyeolEntry>>? _myEntriesSub;
+  StreamSubscription<List<HarugyeolComment>>? _commentsSub;
+
+  late final Worker _authWorker;
+
+  DateTime _now = DateTime.now();
+
+  static const int maxOneLineLength = 40;
+
+  String get selectedDateKey {
+    return dateKeyForOffset(selectedDateOffset.value);
+  }
+
+  bool get isTodaySelected => selectedDateOffset.value == 0;
+
+  bool get isLoggedIn {
+    final user = authController.currentUser.value;
+    if (user == null) return false;
+    if (user.needsProfileSetup) return false;
+    if (user.isWithdrawn || user.isSuspended) return false;
+    return true;
+  }
+
+  bool get hasSelectedRequiredInput {
+    return selectedMood.value != null && selectedReasons.isNotEmpty;
+  }
+
+  bool get isAnyLoading {
+    return isSummaryLoading.value ||
+        isMyEntriesLoading.value ||
+        isCommentsLoading.value;
+  }
+
+  bool get hasSubmittedMidday {
+    return hasSubmittedSlot(HarugyeolSlot.midday);
+  }
+
+  bool get hasSubmittedEvening {
+    return hasSubmittedSlot(HarugyeolSlot.evening);
+  }
+
+  bool get hasSubmittedAnySlot {
+    return hasSubmittedMidday || hasSubmittedEvening;
+  }
+
+  bool get hasSubmittedAllSlots {
+    return hasSubmittedMidday && hasSubmittedEvening;
+  }
+
+  bool get hasAlreadySubmittedCurrentSlot {
+    final slot = selectedInputSlot.value ?? availableSlot.value;
+    if (slot == null) return false;
+
+    return hasSubmittedSlot(slot);
+  }
+
+  bool get hasAnyViewableSlot {
+    return viewableSlots.isNotEmpty;
+  }
+
+  bool get shouldStartMiddayThenEveningFlow {
+    return isTodaySelected &&
+        isLoggedIn &&
+        availableInputSlots.contains(HarugyeolSlot.midday) &&
+        availableInputSlots.contains(HarugyeolSlot.evening) &&
+        !hasSubmittedMidday &&
+        !hasSubmittedEvening;
+  }
+
+  bool get hasRequiredContinuationInput {
+    final slot = requiredContinuationInputSlot.value;
+    if (slot == null) return false;
+
+    if (!canWriteSlot(slot)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  bool get isMiddayThenEveningFlowActive {
+    return inputSlotsToShow.isNotEmpty ||
+        shouldStartMiddayThenEveningFlow ||
+        hasRequiredContinuationInput;
+  }
+
+  bool get shouldLockInputSlotChoice {
+    return isMiddayThenEveningFlowActive;
+  }
+
+  bool get shouldPrioritizeInputBeforeResult {
+    if (inputSlotsToShow.isNotEmpty) return true;
+    if (hasRequiredContinuationInput) return true;
+    if (shouldStartMiddayThenEveningFlow) return true;
+    return false;
+  }
+
+  bool get shouldShowGateFirst {
+    if (shouldPrioritizeInputBeforeResult) return true;
+    if (entryGateMode == HarugyeolEntryGateMode.writeRequired) return true;
+    if (entryGateMode == HarugyeolEntryGateMode.beforeInputTime) return true;
+    if (entryGateMode == HarugyeolEntryGateMode.loginRequired) return true;
+    if (entryGateMode == HarugyeolEntryGateMode.pastLocked) return true;
+    return false;
+  }
+
+  bool get shouldShowResult {
+    if (inputSlotsToShow.isNotEmpty) return false;
+    if (hasRequiredContinuationInput) return false;
+    if (shouldStartMiddayThenEveningFlow) return false;
+
+    return entryGateMode == HarugyeolEntryGateMode.partialResult ||
+        entryGateMode == HarugyeolEntryGateMode.fullResult;
+  }
+
+  HarugyeolEntryGateMode get entryGateMode {
+    if (isSummaryLoading.value || isMyEntriesLoading.value) {
+      return HarugyeolEntryGateMode.loading;
+    }
+
+    if (!isLoggedIn) {
+      return HarugyeolEntryGateMode.loginRequired;
+    }
+
+    if (!isTodaySelected) {
+      if (hasSubmittedAnySlot) {
+        return hasSubmittedAllSlots
+            ? HarugyeolEntryGateMode.fullResult
+            : HarugyeolEntryGateMode.partialResult;
+      }
+
+      return HarugyeolEntryGateMode.pastLocked;
+    }
+
+    if (availableInputSlots.isEmpty) {
+      if (hasSubmittedAnySlot) {
+        return hasSubmittedAllSlots
+            ? HarugyeolEntryGateMode.fullResult
+            : HarugyeolEntryGateMode.partialResult;
+      }
+
+      return HarugyeolEntryGateMode.beforeInputTime;
+    }
+
+    if (inputSlotsToShow.isNotEmpty) {
+      return HarugyeolEntryGateMode.writeRequired;
+    }
+
+    if (!hasSubmittedAnySlot) {
+      return HarugyeolEntryGateMode.writeRequired;
+    }
+
+    if (hasRequiredContinuationInput) {
+      return HarugyeolEntryGateMode.writeRequired;
+    }
+
+    if (hasSubmittedAllSlots) {
+      return HarugyeolEntryGateMode.fullResult;
+    }
+
+    return HarugyeolEntryGateMode.partialResult;
+  }
+
+  List<HarugyeolSlot> get inputSlotsToShow {
+    if (!isTodaySelected || !isLoggedIn) {
+      return const <HarugyeolSlot>[];
+    }
+
+    if (availableInputSlots.isEmpty) {
+      return const <HarugyeolSlot>[];
+    }
+
+    final canInputMidday = availableInputSlots.contains(HarugyeolSlot.midday);
+    final canInputEvening = availableInputSlots.contains(HarugyeolSlot.evening);
+
+    if (!canInputEvening) {
+      if (canInputMidday && !hasSubmittedMidday) {
+        return const <HarugyeolSlot>[HarugyeolSlot.midday];
+      }
+
+      return const <HarugyeolSlot>[];
+    }
+
+    if (!hasSubmittedMidday && !hasSubmittedEvening) {
+      return const <HarugyeolSlot>[
+        HarugyeolSlot.midday,
+        HarugyeolSlot.evening,
+      ];
+    }
+
+    if (hasSubmittedMidday && !hasSubmittedEvening) {
+      return const <HarugyeolSlot>[HarugyeolSlot.evening];
+    }
+
+    if (!hasSubmittedMidday && hasSubmittedEvening) {
+      return const <HarugyeolSlot>[HarugyeolSlot.midday];
+    }
+
+    return const <HarugyeolSlot>[];
+  }
+
+  List<HarugyeolSlot> get viewableSlots {
+    final slots = <HarugyeolSlot>[];
+
+    if (hasSubmittedMidday) {
+      slots.add(HarugyeolSlot.midday);
+    }
+
+    if (hasSubmittedEvening) {
+      slots.add(HarugyeolSlot.evening);
+    }
+
+    return slots;
+  }
+
+  List<HarugyeolSlot> get missingSlots {
+    return HarugyeolSlot.values
+        .where((slot) {
+          return !hasSubmittedSlot(slot);
+        })
+        .toList(growable: false);
+  }
+
+  List<HarugyeolSlot> get writableMissingSlots {
+    return inputSlotsToShow;
+  }
+
+  List<HarugyeolComment> get visibleComments {
+    final slots = viewableSlots.toSet();
+
+    if (slots.isEmpty) {
+      return const <HarugyeolComment>[];
+    }
+
+    return comments
+        .where((comment) {
+          return slots.contains(comment.slot);
+        })
+        .toList(growable: false);
+  }
+
+  List<HarugyeolComment> get visibleTopComments {
+    final list = visibleComments.toList();
+
+    list.sort((a, b) {
+      final likeCompare = b.likeCount.compareTo(a.likeCount);
+      if (likeCompare != 0) return likeCompare;
+
+      final dateCompare = b.createdAt.compareTo(a.createdAt);
+      if (dateCompare != 0) return dateCompare;
+
+      return a.id.compareTo(b.id);
+    });
+
+    return list.take(3).toList(growable: false);
+  }
+
+  HarugyeolDaySummary get visibleSummary {
+    final source = summary.value ?? HarugyeolDaySummary.empty(selectedDateKey);
+
+    return source.filteredBySlots(viewableSlots);
+  }
+
+  String get resultTitle {
+    if (hasSubmittedAllSlots) {
+      return '$selectedDateLabel 장사 체감지수';
+    }
+
+    if (hasSubmittedMidday && !hasSubmittedEvening) {
+      return '$selectedDateLabel 낮 장사 체감지수';
+    }
+
+    if (!hasSubmittedMidday && hasSubmittedEvening) {
+      return '$selectedDateLabel 저녁 장사 체감지수';
+    }
+
+    return '$selectedDateLabel 장사 체감지수';
+  }
+
+  String get reasonTitle {
+    if (hasSubmittedAllSlots) {
+      return '주요 이유';
+    }
+
+    if (hasSubmittedMidday && !hasSubmittedEvening) {
+      return '낮 시간 주요 이유';
+    }
+
+    if (!hasSubmittedMidday && hasSubmittedEvening) {
+      return '저녁 시간 주요 이유';
+    }
+
+    return '주요 이유';
+  }
+
+  String get reasonDescription {
+    if (hasSubmittedAllSlots) {
+      return '오늘의 장사 분위기를 만든 이유 순위입니다.';
+    }
+
+    if (hasSubmittedMidday && !hasSubmittedEvening) {
+      return '낮 장사 분위기를 만든 이유 순위입니다.';
+    }
+
+    if (!hasSubmittedMidday && hasSubmittedEvening) {
+      return '저녁 장사 분위기를 만든 이유 순위입니다.';
+    }
+
+    return '체감을 남기면 이유 순위를 볼 수 있어요.';
+  }
+
+  String get gateTitle {
+    switch (entryGateMode) {
+      case HarugyeolEntryGateMode.loading:
+        return '하루결을 준비하고 있어요';
+      case HarugyeolEntryGateMode.beforeInputTime:
+        return '아직 입력 시간이 아니에요';
+      case HarugyeolEntryGateMode.loginRequired:
+        return '로그인이 필요해요';
+      case HarugyeolEntryGateMode.writeRequired:
+        return '오늘 장사체감을 먼저 남겨주세요';
+      case HarugyeolEntryGateMode.partialResult:
+      case HarugyeolEntryGateMode.fullResult:
+        return '오늘 하루결';
+      case HarugyeolEntryGateMode.pastLocked:
+        return '지난 하루결은 참여자만 볼 수 있어요';
+    }
+  }
+
+  String get gateDescription {
+    switch (entryGateMode) {
+      case HarugyeolEntryGateMode.loading:
+        return '잠시만 기다려주세요.';
+      case HarugyeolEntryGateMode.beforeInputTime:
+        return '하루결은 오전 11시부터 자정까지 남길 수 있어요.';
+      case HarugyeolEntryGateMode.loginRequired:
+        return '장사체감을 남기고 다른 사장님들의 흐름을 확인하려면 로그인이 필요합니다.';
+      case HarugyeolEntryGateMode.writeRequired:
+        if (inputSlotsToShow.length >= 2) {
+          return '낮 장사와 저녁 장사를 모두 남기면 오늘 하루결 결과를 볼 수 있어요.';
+        }
+
+        if (inputSlotsToShow.contains(HarugyeolSlot.evening)) {
+          return '저녁 장사체감까지 남기면 오늘 하루결 결과를 볼 수 있어요.';
+        }
+
+        return '낮 장사체감을 남기면 낮 시간대 흐름을 볼 수 있어요.';
+      case HarugyeolEntryGateMode.partialResult:
+      case HarugyeolEntryGateMode.fullResult:
+        return '입력한 시간대의 흐름만 볼 수 있어요.';
+      case HarugyeolEntryGateMode.pastLocked:
+        return '해당 날짜에 체감을 남긴 시간대의 결과만 확인할 수 있어요.';
+    }
+  }
+
+  String get primaryGateButtonLabel {
+    final slots = inputSlotsToShow;
+
+    if (slots.length >= 2) {
+      return '낮·저녁 체감 입력하기';
+    }
+
+    if (slots.length == 1) {
+      if (slots.first == HarugyeolSlot.evening) {
+        return '저녁 체감 입력하기';
+      }
+
+      return '낮 체감 입력하기';
+    }
+
+    if (!isLoggedIn) return '로그인 후 이용하기';
+    return '입력 시간 기다리기';
+  }
+
+  HarugyeolSlot? get recommendedInputSlot {
+    final writable = inputSlotsToShow;
+
+    if (writable.isEmpty) {
+      return null;
+    }
+
+    return writable.first;
+  }
+
+  bool get isInputEnabled {
+    final slot = selectedInputSlot.value;
+
+    if (!isTodaySelected) return false;
+    if (!isLoggedIn) return false;
+    if (slot == null) return false;
+    if (!availableInputSlots.contains(slot)) return false;
+    if (hasSubmittedSlot(slot)) return false;
+    if (isSubmitting.value) return false;
+    return true;
+  }
+
+  bool get canSubmit {
+    final slots = inputSlotsToShow;
+
+    // 현재 화면에 보이는 낮/저녁 입력칸 기준으로 버튼 활성화
+    if (slots.isNotEmpty) {
+      return canSubmitVisibleInputs;
+    }
+
+    // 예전 단일 입력 흐름 보호용
+    if (!isInputEnabled) return false;
+    if (!hasSelectedRequiredInput) return false;
+    return true;
+  }
+
+  String get inputLockedMessage {
+    if (!isTodaySelected) {
+      return '지난 하루결은 결과만 볼 수 있어요.';
+    }
+
+    if (!isLoggedIn) {
+      return '로그인 후 하루결을 남길 수 있어요.';
+    }
+
+    final slot = selectedInputSlot.value;
+
+    if (slot == null) {
+      return '입력할 장사체감 시간을 선택해주세요.';
+    }
+
+    if (!availableInputSlots.contains(slot)) {
+      return '${slot.label} 입력 가능 시간이 아니에요.';
+    }
+
+    if (hasSubmittedSlot(slot)) {
+      if (slot == HarugyeolSlot.midday) {
+        return '이미 낮 장사체감을 입력했습니다.';
+      }
+
+      if (slot == HarugyeolSlot.evening) {
+        return '이미 저녁 장사체감을 입력했습니다.';
+      }
+
+      return '이미 현재 시간대 장사체감을 입력했습니다.';
+    }
+
+    if (isSubmitting.value) {
+      return '하루결을 등록하고 있어요.';
+    }
+
+    return '';
+  }
+
+  String get submitBlockedMessage {
+    if (!isTodaySelected) {
+      return '오늘 하루결만 입력할 수 있어요.';
+    }
+
+    if (!isLoggedIn) {
+      return '로그인 후 하루결을 남길 수 있어요.';
+    }
+
+    final slot = selectedInputSlot.value;
+
+    if (slot == null) {
+      return '입력할 장사체감 시간을 선택해주세요.';
+    }
+
+    if (!availableInputSlots.contains(slot)) {
+      return '${slot.label} 입력 가능 시간이 아니에요.';
+    }
+
+    if (hasSubmittedSlot(slot)) {
+      return inputLockedMessage;
+    }
+
+    if (selectedMood.value == null) {
+      return '오늘 장사 체감을 선택해주세요.';
+    }
+
+    if (selectedReasons.isEmpty) {
+      return '이유를 하나 이상 선택해주세요.';
+    }
+
+    return '잠시 후 다시 시도해주세요.';
+  }
+
+  String get inputTimeGuide {
+    final slot = selectedInputSlot.value;
+
+    if (!isTodaySelected) {
+      return '지난 하루결은 결과만 볼 수 있어요.';
+    }
+
+    if (availableInputSlots.isEmpty) {
+      return '입력 가능 시간: 오전 11시 ~ 자정';
+    }
+
+    if (slot == null) {
+      return '낮 11:00~17:00 · 저녁 17:01~24:00';
+    }
+
+    return '${slot.label} 입력 가능 · ${slot.timeLabel}';
+  }
+
+  String get selectedDateLabel {
+    switch (selectedDateOffset.value) {
+      case 0:
+        return '오늘';
+      case -1:
+        return '어제';
+      case -2:
+        return '그저께';
+      default:
+        return selectedDateKey;
+    }
+  }
+
+  HarugyeolMood? moodForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        return middayMood.value;
+      case HarugyeolSlot.evening:
+        return eveningMood.value;
+    }
+  }
+
+  RxSet<HarugyeolReason> reasonsForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        return middayReasons;
+      case HarugyeolSlot.evening:
+        return eveningReasons;
+    }
+  }
+
+  String oneLineTextForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        return middayOneLineText.value;
+      case HarugyeolSlot.evening:
+        return eveningOneLineText.value;
+    }
+  }
+
+  void selectMoodForSlot(HarugyeolSlot slot, HarugyeolMood mood) {
+    if (!canWriteSlot(slot)) return;
+
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        middayMood.value = mood;
+        break;
+      case HarugyeolSlot.evening:
+        eveningMood.value = mood;
+        break;
+    }
+
+    errorMessage.value = null;
+  }
+
+  void toggleReasonForSlot(HarugyeolSlot slot, HarugyeolReason reason) {
+    if (!canWriteSlot(slot)) return;
+
+    final target = reasonsForSlot(slot);
+
+    if (target.contains(reason)) {
+      target.remove(reason);
+    } else {
+      target.add(reason);
+    }
+
+    errorMessage.value = null;
+  }
+
+  void changeOneLineTextForSlot(HarugyeolSlot slot, String value) {
+    if (!canWriteSlot(slot)) return;
+
+    final normalized = value.replaceAll('\n', ' ').trimLeft();
+    final safeValue = normalized.length <= maxOneLineLength
+        ? normalized
+        : normalized.substring(0, maxOneLineLength);
+
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        middayOneLineText.value = safeValue;
+        break;
+      case HarugyeolSlot.evening:
+        eveningOneLineText.value = safeValue;
+        break;
+    }
+  }
+
+  bool hasRequiredInputForSlot(HarugyeolSlot slot) {
+    return moodForSlot(slot) != null && reasonsForSlot(slot).isNotEmpty;
+  }
+
+  bool canSubmitSlot(HarugyeolSlot slot) {
+    if (!canWriteSlot(slot)) return false;
+    return hasRequiredInputForSlot(slot);
+  }
+
+  bool get canSubmitVisibleInputs {
+    final slots = inputSlotsToShow;
+
+    if (slots.isEmpty) return false;
+
+    for (final slot in slots) {
+      if (!canSubmitSlot(slot)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  String get visibleInputSubmitBlockedMessage {
+    final slots = inputSlotsToShow;
+
+    if (slots.isEmpty) {
+      return submitBlockedMessage;
+    }
+
+    for (final slot in slots) {
+      if (!canWriteSlot(slot)) {
+        return '${slot.label} 입력 가능 시간이 아니에요.';
+      }
+
+      if (moodForSlot(slot) == null) {
+        return '${slot.shortLabel} 장사 체감을 선택해주세요.';
+      }
+
+      if (reasonsForSlot(slot).isEmpty) {
+        return '${slot.shortLabel} 장사 이유를 하나 이상 선택해주세요.';
+      }
+    }
+
+    return '잠시 후 다시 시도해주세요.';
+  }
+
+  String get visibleInputSubmitButtonText {
+    final slots = inputSlotsToShow;
+
+    if (slots.length >= 2) {
+      return '낮·저녁 장사 등록하기';
+    }
+
+    if (slots.length == 1) {
+      final slot = slots.first;
+
+      if (slot == HarugyeolSlot.midday) {
+        return '낮 장사 등록하기';
+      }
+
+      return '저녁 장사 등록하기';
+    }
+
+    return '등록하기';
+  }
+
+  void clearInputForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        middayMood.value = null;
+        middayReasons.clear();
+        middayOneLineText.value = '';
+        break;
+      case HarugyeolSlot.evening:
+        eveningMood.value = null;
+        eveningReasons.clear();
+        eveningOneLineText.value = '';
+        break;
+    }
+  }
+
+  Future<void> submitVisibleInputs() async {
+    if (isSubmitting.value) return;
+
+    final slots = inputSlotsToShow;
+
+    if (slots.isEmpty || !canSubmitVisibleInputs) {
+      errorMessage.value = visibleInputSubmitBlockedMessage;
+      throw Exception(errorMessage.value);
+    }
+
+    final submitDateKey = selectedDateKey;
+
+    isSubmitting.value = true;
+    errorMessage.value = null;
+
+    try {
+      for (final slot in slots) {
+        final mood = moodForSlot(slot);
+        final reasons = reasonsForSlot(slot).toList(growable: false);
+        final text = oneLineTextForSlot(slot).trim();
+
+        if (mood == null || reasons.isEmpty) {
+          errorMessage.value = visibleInputSubmitBlockedMessage;
+          throw Exception(errorMessage.value);
+        }
+
+        await repo.submitEntry(
+          HarugyeolSubmitInput(
+            dateKey: submitDateKey,
+            slot: slot,
+            mood: mood,
+            reasons: reasons,
+            oneLineText: text,
+          ),
+        );
+
+        _applySubmittedEntryLocally(
+          dateKey: submitDateKey,
+          slot: slot,
+          mood: mood,
+          reasons: reasons,
+          oneLineText: text,
+        );
+
+        clearInputForSlot(slot);
+      }
+
+      requiredContinuationInputSlot.value = null;
+      selectedInputSlot.value = null;
+      submitSuccessMessage.value = slots.length >= 2
+          ? '낮·저녁 장사체감을 남겼어요.'
+          : '하루결을 남겼어요.';
+
+      _ensureSelectedInputSlot();
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  @override
+  void onInit() {
+    super.onInit();
+
+    _refreshNowState();
+    _bindStreams();
+
+    _authWorker = ever(authController.currentUser, (_) {
+      _bindStreams();
+    });
+  }
+
+  @override
+  void onClose() {
+    _summarySub?.cancel();
+    _previousSummarySub?.cancel();
+    _myEntriesSub?.cancel();
+    _commentsSub?.cancel();
+    _authWorker.dispose();
+    super.onClose();
+  }
+
+  void selectDateOffset(int offset) {
+    if (selectedDateOffset.value == offset) return;
+
+    selectedDateOffset.value = offset;
+    errorMessage.value = null;
+    selectedMood.value = null;
+    selectedReasons.clear();
+    oneLineText.value = '';
+    selectedInputSlot.value = null;
+    requiredContinuationInputSlot.value = null;
+    submitSuccessMessage.value = '하루결을 남겼어요.';
+
+    middayMood.value = null;
+    middayReasons.clear();
+    middayOneLineText.value = '';
+
+    eveningMood.value = null;
+    eveningReasons.clear();
+    eveningOneLineText.value = '';
+
+    _optimisticEntriesBySlot.clear();
+
+    _refreshNowState();
+    _bindStreams();
+  }
+
+  void selectInputSlot(HarugyeolSlot slot) {
+    if (!availableInputSlots.contains(slot)) return;
+    if (hasSubmittedSlot(slot)) return;
+
+    selectedInputSlot.value = slot;
+    selectedMood.value = null;
+    selectedReasons.clear();
+    oneLineText.value = '';
+    errorMessage.value = null;
+  }
+
+  void selectRecommendedInputSlot() {
+    final slot = recommendedInputSlot;
+    if (slot == null) return;
+
+    selectInputSlot(slot);
+  }
+
+  void selectMood(HarugyeolMood mood) {
+    if (!isInputEnabled) return;
+
+    selectedMood.value = mood;
+    errorMessage.value = null;
+  }
+
+  void toggleReason(HarugyeolReason reason) {
+    if (!isInputEnabled) return;
+
+    if (selectedReasons.contains(reason)) {
+      selectedReasons.remove(reason);
+    } else {
+      selectedReasons.add(reason);
+    }
+
+    errorMessage.value = null;
+  }
+
+  void changeOneLineText(String value) {
+    if (!isInputEnabled) return;
+
+    final normalized = value.replaceAll('\n', ' ').trimLeft();
+
+    if (normalized.length <= maxOneLineLength) {
+      oneLineText.value = normalized;
+      return;
+    }
+
+    oneLineText.value = normalized.substring(0, maxOneLineLength);
+  }
+
+  @override
+  Future<void> refresh() async {
+    _refreshNowState();
+    _bindStreams();
+  }
+
+  // ─── 수정됨 ───────────────────────────────────────────────────────────────
+  // 낮·저녁 동시 흐름(inputSlotsToShow >= 2)에서 submit()을 호출하면
+  // selectedInputSlot이 null이거나 단일 슬롯만 처리되는 버그 수정.
+  // 다중 슬롯 흐름은 submitVisibleInputs()로 바로 위임한다.
+  Future<void> submit() async {
+    if (isSubmitting.value) return;
+
+    final slots = inputSlotsToShow;
+
+    // 현재 하루결 화면은 낮/저녁 입력칸을 직접 보여주는 구조이므로
+    // 화면에 보이는 입력칸이 있으면 무조건 submitVisibleInputs()로 처리한다.
+    if (slots.isNotEmpty) {
+      await submitVisibleInputs();
+      return;
+    }
+
+    // 예전 단일 슬롯 입력 흐름 보호용
+    final slot = selectedInputSlot.value;
+
+    if (slot == null) {
+      errorMessage.value = submitBlockedMessage;
+      throw Exception(errorMessage.value);
+    }
+
+    final mood = selectedMood.value;
+
+    if (mood == null || selectedReasons.isEmpty) {
+      errorMessage.value = submitBlockedMessage;
+      throw Exception(errorMessage.value);
+    }
+
+    selectMoodForSlot(slot, mood);
+
+    for (final reason in selectedReasons) {
+      if (!reasonsForSlot(slot).contains(reason)) {
+        reasonsForSlot(slot).add(reason);
+      }
+    }
+
+    changeOneLineTextForSlot(slot, oneLineText.value);
+
+    await submitVisibleInputs();
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  void _applySubmittedEntryLocally({
+    required String dateKey,
+    required HarugyeolSlot slot,
+    required HarugyeolMood mood,
+    required List<HarugyeolReason> reasons,
+    required String oneLineText,
+  }) {
+    if (dateKey != selectedDateKey) return;
+
+    final now = DateTime.now();
+
+    final optimisticEntry = HarugyeolEntry(
+      id: 'local_${dateKey}_${slot.key}',
+      dateKey: dateKey,
+      userId: '',
+      authorLabel: '나',
+      industryId: null,
+      locationLabel: null,
+      isOwnerVerified: false,
+      slot: slot,
+      mood: mood,
+      score: mood.score,
+      reasons: reasons,
+      oneLineText: oneLineText,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    _optimisticEntriesBySlot[slot] = optimisticEntry;
+
+    final merged = _mergeEntriesWithOptimistic(myEntries.toList());
+    myEntries.assignAll(merged);
+  }
+
+  bool hasSubmittedSlot(HarugyeolSlot slot) {
+    return myEntries.any((entry) => entry.slot == slot);
+  }
+
+  bool canWriteSlot(HarugyeolSlot slot) {
+    if (!isTodaySelected) return false;
+    if (!isLoggedIn) return false;
+    if (!availableInputSlots.contains(slot)) return false;
+    if (hasSubmittedSlot(slot)) return false;
+    if (isSubmitting.value) return false;
+    return true;
+  }
+
+  bool isCommentLikePending(String commentId) {
+    final safeCommentId = commentId.trim();
+    if (safeCommentId.isEmpty) return false;
+    return pendingLikeCommentIds.contains(safeCommentId);
+  }
+
+  Future<void> toggleCommentLike(HarugyeolComment comment) async {
+    final commentId = comment.id.trim();
+
+    if (commentId.isEmpty) {
+      errorMessage.value = '한마디 정보를 확인하지 못했습니다.';
+      throw Exception(errorMessage.value);
+    }
+
+    if (pendingLikeCommentIds.contains(commentId)) {
+      errorMessage.value = '좋아요를 처리하고 있어요.';
+      throw Exception(errorMessage.value);
+    }
+
+    if (!isLoggedIn) {
+      errorMessage.value = '로그인 후 좋아요를 누를 수 있어요.';
+      throw Exception(errorMessage.value);
+    }
+
+    if (!viewableSlots.contains(comment.slot)) {
+      errorMessage.value = '체감을 남긴 시간대의 한마디만 좋아요를 누를 수 있어요.';
+      throw Exception(errorMessage.value);
+    }
+
+    pendingLikeCommentIds.add(commentId);
+    errorMessage.value = null;
+
+    try {
+      await repo.toggleCommentLike(
+        dateKey: selectedDateKey,
+        commentId: commentId,
+      );
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      pendingLikeCommentIds.remove(commentId);
+    }
+  }
+
+  String flowInsightText(HarugyeolDaySummary value) {
+    if (!hasSubmittedAllSlots) return '';
+    if (!value.hasData) return '';
+
+    final midday = value.slotStats[HarugyeolSlot.midday]?.averageScore ?? 0;
+    final evening = value.slotStats[HarugyeolSlot.evening]?.averageScore ?? 0;
+
+    if (midday <= 0 || evening <= 0) {
+      return '';
+    }
+
+    final diff = evening - midday;
+
+    if (diff >= 15) {
+      return '낮보다 저녁 장사체감이 확실히 좋아졌어요.';
+    }
+
+    if (diff >= 6) {
+      return '낮보다 저녁 장사체감이 조금 나아졌어요.';
+    }
+
+    if (diff <= -15) {
+      return '낮보다 저녁 장사체감이 확실히 약해졌어요.';
+    }
+
+    if (diff <= -6) {
+      return '낮보다 저녁 장사체감이 조금 낮아졌어요.';
+    }
+
+    return '낮과 저녁 체감이 비슷하게 이어지고 있어요.';
+  }
+
+  String scoreBadgeText(HarugyeolDaySummary? current) {
+    if (selectedDateOffset.value != 0) {
+      return selectedDateLabel;
+    }
+
+    if (current == null || !current.hasData) {
+      return '집계 전';
+    }
+
+    if (hasSubmittedAllSlots) {
+      return '전체';
+    }
+
+    if (hasSubmittedMidday) {
+      return '낮';
+    }
+
+    if (hasSubmittedEvening) {
+      return '저녁';
+    }
+
+    return '잠금';
+  }
+
+  String todayCompareText(HarugyeolDaySummary? current) {
+    if (selectedDateOffset.value != 0) {
+      return '';
+    }
+
+    if (current == null || !current.hasData) {
+      return '';
+    }
+
+    final previous = previousSummary.value;
+    if (previous == null || !previous.hasData) {
+      return '';
+    }
+
+    if (viewableSlots.isEmpty) {
+      return '';
+    }
+
+    final currentVisible = current.filteredBySlots(viewableSlots);
+    final previousVisible = previous.filteredBySlots(viewableSlots);
+
+    if (!currentVisible.hasData || !previousVisible.hasData) {
+      return '';
+    }
+
+    final currentScore = currentVisible.averageScore.round();
+    final previousScore = previousVisible.averageScore.round();
+    final diff = currentScore - previousScore;
+
+    if (diff > 0) {
+      return '어제보다 ${diff.abs()}점 높아요';
+    }
+
+    if (diff < 0) {
+      return '어제보다 ${diff.abs()}점 낮아요';
+    }
+
+    return '어제와 같아요';
+  }
+
+  List<MapEntry<HarugyeolReason, int>> reasonDistributionEntries(
+    HarugyeolDaySummary value,
+  ) {
+    final entries = HarugyeolReason.values.map((reason) {
+      return MapEntry(reason, value.reasonCounts[reason] ?? 0);
+    }).toList();
+
+    entries.sort((a, b) {
+      final countCompare = b.value.compareTo(a.value);
+      if (countCompare != 0) return countCompare;
+
+      return HarugyeolReason.values
+          .indexOf(a.key)
+          .compareTo(HarugyeolReason.values.indexOf(b.key));
+    });
+
+    return entries;
+  }
+
+  List<MapEntry<HarugyeolReason, int>> visibleReasonRankEntries(
+    HarugyeolDaySummary value,
+  ) {
+    return reasonDistributionEntries(value);
+  }
+
+  String lockedSlotTitle(HarugyeolSlot slot) {
+    if (slot == HarugyeolSlot.midday) {
+      return '낮 장사 흐름은 잠겨 있어요';
+    }
+
+    return '저녁 장사 흐름은 잠겨 있어요';
+  }
+
+  String lockedSlotDescription(HarugyeolSlot slot) {
+    if (!isTodaySelected) {
+      return '해당 날짜에 ${slot.shortLabel} 체감을 남기지 않아 결과를 볼 수 없어요.';
+    }
+
+    if (canWriteSlot(slot)) {
+      return '${slot.shortLabel} 체감을 남기면 ${slot.shortLabel} 시간대 흐름을 볼 수 있어요.';
+    }
+
+    if (slot == HarugyeolSlot.evening) {
+      return '저녁 체감은 오후 5시 1분부터 남길 수 있어요.';
+    }
+
+    return '낮 체감은 오전 11시부터 자정까지 남길 수 있어요.';
+  }
+
+  String dateKeyForOffset(int offset) {
+    final date = DateTime.now().add(Duration(days: offset));
+    return _dateKey(date);
+  }
+
+  void _refreshNowState() {
+    _now = DateTime.now();
+    availableSlot.value = currentHarugyeolSlot(_now);
+    availableInputSlots.assignAll(availableHarugyeolInputSlots(_now));
+    nowLabel.value = _formatNowLabel(_now);
+    _normalizeContinuationInputSlot();
+    _ensureSelectedInputSlot();
+  }
+
+  void _ensureSelectedInputSlot() {
+    _normalizeContinuationInputSlot();
+
+    final inputSlots = inputSlotsToShow;
+    if (inputSlots.isNotEmpty) {
+      selectedInputSlot.value = inputSlots.first;
+      return;
+    }
+
+    final requiredSlot = requiredContinuationInputSlot.value;
+    if (requiredSlot != null && canWriteSlot(requiredSlot)) {
+      selectedInputSlot.value = requiredSlot;
+      return;
+    }
+
+    final currentSelected = selectedInputSlot.value;
+
+    if (currentSelected != null && canWriteSlot(currentSelected)) {
+      return;
+    }
+
+    final recommended = recommendedInputSlot;
+
+    if (recommended == null) {
+      selectedInputSlot.value = null;
+      return;
+    }
+
+    selectedInputSlot.value = recommended;
+  }
+
+  void _normalizeContinuationInputSlot() {
+    final requiredSlot = requiredContinuationInputSlot.value;
+    if (requiredSlot == null) return;
+
+    if (!canWriteSlot(requiredSlot)) {
+      requiredContinuationInputSlot.value = null;
+    }
+  }
+
+  void _bindStreams() {
+    final dateKey = selectedDateKey;
+
+    isSummaryLoading.value = true;
+    isMyEntriesLoading.value = true;
+    isCommentsLoading.value = true;
+
+    _summarySub?.cancel();
+    _summarySub = repo.watchDaySummary(dateKey).listen(
+      (value) {
+        summary.value = value;
+        isSummaryLoading.value = false;
+      },
+      onError: (e) {
+        summary.value = HarugyeolDaySummary.empty(dateKey);
+        isSummaryLoading.value = false;
+        errorMessage.value = _friendlyError(e);
+      },
+    );
+
+    _bindPreviousSummaryIfNeeded();
+
+    _myEntriesSub?.cancel();
+    _myEntriesSub = repo.watchMyEntries(dateKey).listen(
+      (items) {
+        final serverSlots = items.map((entry) => entry.slot).toSet();
+
+        _optimisticEntriesBySlot.removeWhere((slot, _) {
+          return serverSlots.contains(slot);
+        });
+
+        myEntries.assignAll(_mergeEntriesWithOptimistic(items));
+        isMyEntriesLoading.value = false;
+        _ensureSelectedInputSlot();
+      },
+      onError: (e) {
+        final merged = _mergeEntriesWithOptimistic(const <HarugyeolEntry>[]);
+
+        myEntries.assignAll(merged);
+        isMyEntriesLoading.value = false;
+        _ensureSelectedInputSlot();
+        errorMessage.value = _friendlyError(e);
+      },
+    );
+
+    _commentsSub?.cancel();
+    _commentsSub = repo.watchComments(dateKey).listen(
+      (items) {
+        final sorted = _sortCommentsByLike(items);
+        comments.assignAll(sorted);
+        topComments.assignAll(sorted.take(3));
+        isCommentsLoading.value = false;
+      },
+      onError: (e) {
+        comments.clear();
+        topComments.clear();
+        isCommentsLoading.value = false;
+        errorMessage.value = _friendlyError(e);
+      },
+    );
+  }
+
+  void _bindPreviousSummaryIfNeeded() {
+    _previousSummarySub?.cancel();
+    previousSummary.value = null;
+    isPreviousSummaryLoading.value = false;
+
+    if (!isTodaySelected) {
+      return;
+    }
+
+    isPreviousSummaryLoading.value = true;
+    final previousDateKey = dateKeyForOffset(-1);
+
+    _previousSummarySub = repo.watchDaySummary(previousDateKey).listen(
+      (value) {
+        previousSummary.value = value;
+        isPreviousSummaryLoading.value = false;
+      },
+      onError: (_) {
+        previousSummary.value = HarugyeolDaySummary.empty(previousDateKey);
+        isPreviousSummaryLoading.value = false;
+      },
+    );
+  }
+
+  List<HarugyeolEntry> _mergeEntriesWithOptimistic(
+    List<HarugyeolEntry> serverItems,
+  ) {
+    final mergedBySlot = <HarugyeolSlot, HarugyeolEntry>{};
+
+    for (final item in serverItems) {
+      mergedBySlot[item.slot] = item;
+    }
+
+    for (final entry in _optimisticEntriesBySlot.values) {
+      mergedBySlot.putIfAbsent(entry.slot, () => entry);
+    }
+
+    final merged = mergedBySlot.values.toList(growable: false);
+
+    merged.sort((a, b) {
+      return a.slot.index.compareTo(b.slot.index);
+    });
+
+    return merged;
+  }
+
+  List<HarugyeolComment> _sortCommentsByLike(List<HarugyeolComment> source) {
+    final list = source.toList();
+
+    list.sort((a, b) {
+      final likeCompare = b.likeCount.compareTo(a.likeCount);
+      if (likeCompare != 0) return likeCompare;
+
+      final dateCompare = b.createdAt.compareTo(a.createdAt);
+      if (dateCompare != 0) return dateCompare;
+
+      return a.id.compareTo(b.id);
+    });
+
+    return list;
+  }
+
+  String _dateKey(DateTime date) {
+    final y = date.year.toString().padLeft(4, '0');
+    final m = date.month.toString().padLeft(2, '0');
+    final d = date.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
+  String _formatNowLabel(DateTime value) {
+    final hour = value.hour;
+    final minute = value.minute.toString().padLeft(2, '0');
+    final period = hour >= 12 ? '오후' : '오전';
+    final displayHour = hour == 0
+        ? 12
+        : hour > 12
+            ? hour - 12
+            : hour;
+
+    return '$period $displayHour:$minute';
+  }
+
+  String _friendlyError(Object error) {
+    final raw = error.toString().toLowerCase();
+
+    if (raw.contains('not-found') || raw.contains('function')) {
+      return '하루결 서버 기능이 아직 연결되지 않았습니다.';
+    }
+
+    if (raw.contains('permission-denied')) {
+      return '하루결 권한을 확인하지 못했습니다.';
+    }
+
+    if (raw.contains('unauthenticated') || raw.contains('로그인')) {
+      return '로그인이 필요합니다.';
+    }
+
+    if (raw.contains('already') || raw.contains('duplicate')) {
+      return '현재 시간대 하루결은 이미 남겼어요.';
+    }
+
+    if (raw.contains('not-found') || raw.contains('comment not found')) {
+      return '한마디 정보를 찾지 못했습니다.';
+    }
+
+    if (raw.contains('inactive account')) {
+      return '현재 계정 상태에서는 이용할 수 없습니다.';
+    }
+
+    if (raw.contains('inactive harugyeol comment')) {
+      return '현재 좋아요를 누를 수 없는 한마디입니다.';
+    }
+
+    if (raw.contains('invalid slot')) {
+      return '입력 가능한 시간대가 아닙니다.';
+    }
+
+    if (raw.contains('deadline-exceeded') || raw.contains('timeout')) {
+      return '요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.';
+    }
+
+    if (raw.contains('unavailable') || raw.contains('network')) {
+      return '서버 연결이 불안정합니다. 잠시 후 다시 시도해주세요.';
+    }
+
+    return '하루결 처리 중 문제가 발생했습니다.';
+  }
+}
+
+// END_OF_FILE: lib/features/harugyeol/controller/harugyeol_controller.dart

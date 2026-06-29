@@ -495,18 +495,14 @@ function getHarugyeolDateKeyOffset(offsetDays) {
 function canSubmitHarugyeolSlot(slot, minutes) {
   const middayStart = 11 * 60;
   const eveningStart = 17 * 60 + 1;
-  const dayEnd = 23 * 60 + 59;
-
-  if (minutes < middayStart || minutes > dayEnd) {
-    return false;
-  }
+  const eveningEnd = 23 * 60 + 59;
 
   if (slot === "midday") {
-    return minutes >= middayStart && minutes <= dayEnd;
+    return minutes >= middayStart && minutes <= eveningEnd;
   }
 
   if (slot === "evening") {
-    return minutes >= eveningStart && minutes <= dayEnd;
+    return minutes >= eveningStart && minutes <= eveningEnd;
   }
 
   return false;

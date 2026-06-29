@@ -1,4 +1,4 @@
-const admin = require("firebase-admin");
+﻿const admin = require("firebase-admin");
 const { HttpsError, onCall } = require("firebase-functions/v2/https");
 const { logger } = require("firebase-functions");
 
@@ -181,6 +181,37 @@ exports.submitHarugyeolEntry = onCall(
         reasonCounts: nextSlotReasonCounts,
       };
 
+      const hourlyStats = normalizeHarugyeolHourlyStats(currentDay.hourlyStats);
+      const graphHour = resolveHarugyeolGraphHour({
+        slot,
+        hour: kst.hour,
+        minutes: kst.minutes,
+      });
+
+      if (graphHour !== null) {
+        const hourKey = String(graphHour).padStart(2, "0");
+        const hourlyStatKey = `${slot}_${hourKey}`;
+        const currentHourlyStat =
+          hourlyStats[hourlyStatKey] ||
+          createEmptyHarugyeolHourlyStat({
+            slot,
+            hour: graphHour,
+          });
+
+        const nextHourlyCount = toFiniteNumber(currentHourlyStat.count) + 1;
+        const nextHourlyScoreSum =
+          toFiniteNumber(currentHourlyStat.scoreSum) + score;
+
+        hourlyStats[hourlyStatKey] = {
+          hour: graphHour,
+          slot,
+          count: nextHourlyCount,
+          scoreSum: nextHourlyScoreSum,
+          averageScore:
+            nextHourlyCount > 0 ? nextHourlyScoreSum / nextHourlyCount : 0,
+        };
+      }
+
       const moodCounts = normalizeHarugyeolMoodCounts(currentDay.moodCounts);
       moodCounts[mood] = toFiniteNumber(moodCounts[mood]) + 1;
 
@@ -200,6 +231,7 @@ exports.submitHarugyeolEntry = onCall(
           scoreSum,
           averageScore,
           slotStats,
+          hourlyStats,
           moodCounts,
           reasonCounts,
           createdAt: currentDay.createdAt || now,
@@ -448,6 +480,8 @@ function getHarugyeolKstNowParts(date = new Date()) {
 
   return {
     dateKey: `${year}-${month}-${day}`,
+    hour,
+    minute,
     minutes: hour * 60 + minute,
   };
 }
@@ -476,6 +510,43 @@ function canSubmitHarugyeolSlot(slot, minutes) {
   }
 
   return false;
+}
+
+function resolveHarugyeolGraphHour({ slot, hour, minutes }) {
+  const middayStart = 11 * 60;
+  const middayEnd = 17 * 60;
+  const eveningStart = 17 * 60 + 1;
+  const dayEnd = 23 * 60 + 59;
+
+  if (!HARUGYEOL_VALID_SLOTS.has(slot)) {
+    return null;
+  }
+
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23) {
+    return null;
+  }
+
+  if (!Number.isFinite(minutes)) {
+    return null;
+  }
+
+  if (slot === "midday") {
+    if (minutes < middayStart || minutes > middayEnd) {
+      return null;
+    }
+
+    return Math.min(Math.max(hour, 11), 16);
+  }
+
+  if (slot === "evening") {
+    if (minutes < eveningStart || minutes > dayEnd) {
+      return null;
+    }
+
+    return Math.min(Math.max(hour, 17), 22);
+  }
+
+  return null;
 }
 
 function parseHarugyeolReasons(rawReasons) {
@@ -529,6 +600,66 @@ function assertHarugyeolDateKeyWithinRecent3Days(dateKey) {
       "Only recent harugyeol comments can be liked."
     );
   }
+}
+
+function normalizeHarugyeolHourlyStats(raw) {
+  const result = {};
+
+  if (!raw || typeof raw !== "object") {
+    return result;
+  }
+
+  Object.keys(raw).forEach((key) => {
+    const value = raw[key];
+
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    const slot = normalizeString(value.slot);
+    const hour = Math.trunc(toFiniteNumber(value.hour));
+
+    if (!HARUGYEOL_VALID_SLOTS.has(slot)) {
+      return;
+    }
+
+    if (hour < 0 || hour > 23) {
+      return;
+    }
+
+    const count = toFiniteNumber(value.count);
+    const scoreSum = toFiniteNumber(value.scoreSum);
+
+    if (count <= 0) {
+      return;
+    }
+
+    const hourKey = String(hour).padStart(2, "0");
+    const normalizedKey = `${slot}_${hourKey}`;
+
+    result[normalizedKey] = {
+      hour,
+      slot,
+      count,
+      scoreSum,
+      averageScore:
+        count > 0
+          ? toFiniteNumber(value.averageScore) || scoreSum / count
+          : 0,
+    };
+  });
+
+  return result;
+}
+
+function createEmptyHarugyeolHourlyStat({ slot, hour }) {
+  return {
+    hour,
+    slot,
+    count: 0,
+    scoreSum: 0,
+    averageScore: 0,
+  };
 }
 
 function normalizeHarugyeolSlotStats(raw) {

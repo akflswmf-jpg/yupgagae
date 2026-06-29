@@ -23,12 +23,24 @@ class HarugyeolController extends GetxController {
   final HarugyeolRepository repo;
   final AuthController authController;
 
-  HarugyeolController({required this.repo, required this.authController});
+  HarugyeolController({
+    required this.repo,
+    required this.authController,
+  });
 
   final selectedDateOffset = 0.obs;
+
   final selectedMood = Rxn<HarugyeolMood>();
   final selectedReasons = <HarugyeolReason>{}.obs;
   final oneLineText = ''.obs;
+
+  final middayMood = Rxn<HarugyeolMood>();
+  final middayReasons = <HarugyeolReason>{}.obs;
+  final middayOneLineText = ''.obs;
+
+  final eveningMood = Rxn<HarugyeolMood>();
+  final eveningReasons = <HarugyeolReason>{}.obs;
+  final eveningOneLineText = ''.obs;
 
   final summary = Rxn<HarugyeolDaySummary>();
   final previousSummary = Rxn<HarugyeolDaySummary>();
@@ -36,6 +48,8 @@ class HarugyeolController extends GetxController {
   final comments = <HarugyeolComment>[].obs;
   final topComments = <HarugyeolComment>[].obs;
   final pendingLikeCommentIds = <String>{}.obs;
+
+  final Map<HarugyeolSlot, HarugyeolEntry> _optimisticEntriesBySlot = {};
 
   final availableSlot = Rxn<HarugyeolSlot>();
   final availableInputSlots = <HarugyeolSlot>[].obs;
@@ -56,7 +70,9 @@ class HarugyeolController extends GetxController {
   StreamSubscription<List<HarugyeolEntry>>? _myEntriesSub;
   StreamSubscription<List<HarugyeolComment>>? _commentsSub;
 
-  late final Worker _authWorker;
+  late final Worker _authUserWorker;
+  late final Worker _authInitializedWorker;
+  late final Worker _authRestoringWorker;
 
   DateTime _now = DateTime.now();
 
@@ -134,7 +150,9 @@ class HarugyeolController extends GetxController {
   }
 
   bool get isMiddayThenEveningFlowActive {
-    return shouldStartMiddayThenEveningFlow || hasRequiredContinuationInput;
+    return inputSlotsToShow.isNotEmpty ||
+        shouldStartMiddayThenEveningFlow ||
+        hasRequiredContinuationInput;
   }
 
   bool get shouldLockInputSlotChoice {
@@ -142,7 +160,10 @@ class HarugyeolController extends GetxController {
   }
 
   bool get shouldPrioritizeInputBeforeResult {
-    return hasRequiredContinuationInput || shouldStartMiddayThenEveningFlow;
+    if (inputSlotsToShow.isNotEmpty) return true;
+    if (hasRequiredContinuationInput) return true;
+    if (shouldStartMiddayThenEveningFlow) return true;
+    return false;
   }
 
   bool get shouldShowGateFirst {
@@ -155,6 +176,10 @@ class HarugyeolController extends GetxController {
   }
 
   bool get shouldShowResult {
+    if (inputSlotsToShow.isNotEmpty) return false;
+    if (hasRequiredContinuationInput) return false;
+    if (shouldStartMiddayThenEveningFlow) return false;
+
     return entryGateMode == HarugyeolEntryGateMode.partialResult ||
         entryGateMode == HarugyeolEntryGateMode.fullResult;
   }
@@ -188,7 +213,15 @@ class HarugyeolController extends GetxController {
       return HarugyeolEntryGateMode.beforeInputTime;
     }
 
+    if (inputSlotsToShow.isNotEmpty) {
+      return HarugyeolEntryGateMode.writeRequired;
+    }
+
     if (!hasSubmittedAnySlot) {
+      return HarugyeolEntryGateMode.writeRequired;
+    }
+
+    if (hasRequiredContinuationInput) {
       return HarugyeolEntryGateMode.writeRequired;
     }
 
@@ -197,6 +230,44 @@ class HarugyeolController extends GetxController {
     }
 
     return HarugyeolEntryGateMode.partialResult;
+  }
+
+  List<HarugyeolSlot> get inputSlotsToShow {
+    if (!isTodaySelected || !isLoggedIn) {
+      return const <HarugyeolSlot>[];
+    }
+
+    if (availableInputSlots.isEmpty) {
+      return const <HarugyeolSlot>[];
+    }
+
+    final canInputMidday = availableInputSlots.contains(HarugyeolSlot.midday);
+    final canInputEvening = availableInputSlots.contains(HarugyeolSlot.evening);
+
+    if (!canInputEvening) {
+      if (canInputMidday && !hasSubmittedMidday) {
+        return const <HarugyeolSlot>[HarugyeolSlot.midday];
+      }
+
+      return const <HarugyeolSlot>[];
+    }
+
+    if (!hasSubmittedMidday && !hasSubmittedEvening) {
+      return const <HarugyeolSlot>[
+        HarugyeolSlot.midday,
+        HarugyeolSlot.evening,
+      ];
+    }
+
+    if (hasSubmittedMidday && !hasSubmittedEvening) {
+      return const <HarugyeolSlot>[HarugyeolSlot.evening];
+    }
+
+    if (!hasSubmittedMidday && hasSubmittedEvening) {
+      return const <HarugyeolSlot>[HarugyeolSlot.midday];
+    }
+
+    return const <HarugyeolSlot>[];
   }
 
   List<HarugyeolSlot> get viewableSlots {
@@ -222,15 +293,7 @@ class HarugyeolController extends GetxController {
   }
 
   List<HarugyeolSlot> get writableMissingSlots {
-    if (!isTodaySelected || !isLoggedIn) {
-      return const <HarugyeolSlot>[];
-    }
-
-    return availableInputSlots
-        .where((slot) {
-          return !hasSubmittedSlot(slot);
-        })
-        .toList(growable: false);
+    return inputSlotsToShow;
   }
 
   List<HarugyeolComment> get visibleComments {
@@ -344,12 +407,12 @@ class HarugyeolController extends GetxController {
       case HarugyeolEntryGateMode.loginRequired:
         return '장사체감을 남기고 다른 사장님들의 흐름을 확인하려면 로그인이 필요합니다.';
       case HarugyeolEntryGateMode.writeRequired:
-        if (shouldStartMiddayThenEveningFlow) {
-          return '먼저 낮 장사체감을 남긴 뒤 저녁 장사체감까지 이어서 입력합니다.';
+        if (inputSlotsToShow.length >= 2) {
+          return '낮 장사와 저녁 장사를 모두 남기면 오늘 하루결 결과를 볼 수 있어요.';
         }
 
-        if (availableInputSlots.contains(HarugyeolSlot.evening)) {
-          return '저녁 체감 또는 낮 체감을 남기면 해당 시간대 흐름을 볼 수 있어요.';
+        if (inputSlotsToShow.contains(HarugyeolSlot.evening)) {
+          return '저녁 장사체감까지 남기면 오늘 하루결 결과를 볼 수 있어요.';
         }
 
         return '낮 장사체감을 남기면 낮 시간대 흐름을 볼 수 있어요.';
@@ -362,42 +425,29 @@ class HarugyeolController extends GetxController {
   }
 
   String get primaryGateButtonLabel {
-    final primarySlot = recommendedInputSlot;
+    final slots = inputSlotsToShow;
 
-    if (primarySlot == null) {
-      if (!isLoggedIn) return '로그인 후 이용하기';
-      return '입력 시간 기다리기';
+    if (slots.length >= 2) {
+      return '낮·저녁 체감 입력하기';
     }
 
-    if (primarySlot == HarugyeolSlot.evening) {
-      return '저녁 체감 입력하기';
+    if (slots.length == 1) {
+      if (slots.first == HarugyeolSlot.evening) {
+        return '저녁 체감 입력하기';
+      }
+
+      return '낮 체감 입력하기';
     }
 
-    return '낮 체감 입력하기';
+    if (!isLoggedIn) return '로그인 후 이용하기';
+    return '입력 시간 기다리기';
   }
 
   HarugyeolSlot? get recommendedInputSlot {
-    final writable = writableMissingSlots;
+    final writable = inputSlotsToShow;
 
     if (writable.isEmpty) {
       return null;
-    }
-
-    if (shouldStartMiddayThenEveningFlow) {
-      return HarugyeolSlot.midday;
-    }
-
-    final requiredSlot = requiredContinuationInputSlot.value;
-    if (requiredSlot != null && writable.contains(requiredSlot)) {
-      return requiredSlot;
-    }
-
-    if (writable.contains(HarugyeolSlot.midday)) {
-      return HarugyeolSlot.midday;
-    }
-
-    if (writable.contains(HarugyeolSlot.evening)) {
-      return HarugyeolSlot.evening;
     }
 
     return writable.first;
@@ -416,6 +466,12 @@ class HarugyeolController extends GetxController {
   }
 
   bool get canSubmit {
+    final slots = inputSlotsToShow;
+
+    if (slots.isNotEmpty) {
+      return canSubmitVisibleInputs;
+    }
+
     if (!isInputEnabled) return false;
     if (!hasSelectedRequiredInput) return false;
     return true;
@@ -524,16 +580,244 @@ class HarugyeolController extends GetxController {
     }
   }
 
+  HarugyeolMood? moodForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        return middayMood.value;
+      case HarugyeolSlot.evening:
+        return eveningMood.value;
+    }
+  }
+
+  RxSet<HarugyeolReason> reasonsForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        return middayReasons;
+      case HarugyeolSlot.evening:
+        return eveningReasons;
+    }
+  }
+
+  String oneLineTextForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        return middayOneLineText.value;
+      case HarugyeolSlot.evening:
+        return eveningOneLineText.value;
+    }
+  }
+
+  void selectMoodForSlot(HarugyeolSlot slot, HarugyeolMood mood) {
+    if (!canWriteSlot(slot)) return;
+
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        middayMood.value = mood;
+        break;
+      case HarugyeolSlot.evening:
+        eveningMood.value = mood;
+        break;
+    }
+
+    errorMessage.value = null;
+  }
+
+  void toggleReasonForSlot(HarugyeolSlot slot, HarugyeolReason reason) {
+    if (!canWriteSlot(slot)) return;
+
+    final target = reasonsForSlot(slot);
+
+    if (target.contains(reason)) {
+      target.remove(reason);
+    } else {
+      target.add(reason);
+    }
+
+    errorMessage.value = null;
+  }
+
+  void changeOneLineTextForSlot(HarugyeolSlot slot, String value) {
+    if (!canWriteSlot(slot)) return;
+
+    final normalized = value.replaceAll('\n', ' ').trimLeft();
+    final safeValue = normalized.length <= maxOneLineLength
+        ? normalized
+        : normalized.substring(0, maxOneLineLength);
+
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        middayOneLineText.value = safeValue;
+        break;
+      case HarugyeolSlot.evening:
+        eveningOneLineText.value = safeValue;
+        break;
+    }
+  }
+
+  bool hasRequiredInputForSlot(HarugyeolSlot slot) {
+    return moodForSlot(slot) != null && reasonsForSlot(slot).isNotEmpty;
+  }
+
+  bool canSubmitSlot(HarugyeolSlot slot) {
+    if (!canWriteSlot(slot)) return false;
+    return hasRequiredInputForSlot(slot);
+  }
+
+  bool get canSubmitVisibleInputs {
+    final slots = inputSlotsToShow;
+
+    if (slots.isEmpty) return false;
+
+    for (final slot in slots) {
+      if (!canSubmitSlot(slot)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  String get visibleInputSubmitBlockedMessage {
+    final slots = inputSlotsToShow;
+
+    if (slots.isEmpty) {
+      return submitBlockedMessage;
+    }
+
+    for (final slot in slots) {
+      if (!canWriteSlot(slot)) {
+        return '${slot.label} 입력 가능 시간이 아니에요.';
+      }
+
+      if (moodForSlot(slot) == null) {
+        return '${slot.shortLabel} 장사 체감을 선택해주세요.';
+      }
+
+      if (reasonsForSlot(slot).isEmpty) {
+        return '${slot.shortLabel} 장사 이유를 하나 이상 선택해주세요.';
+      }
+    }
+
+    return '잠시 후 다시 시도해주세요.';
+  }
+
+  String get visibleInputSubmitButtonText {
+    final slots = inputSlotsToShow;
+
+    if (slots.length >= 2) {
+      return '낮·저녁 장사 등록하기';
+    }
+
+    if (slots.length == 1) {
+      final slot = slots.first;
+
+      if (slot == HarugyeolSlot.midday) {
+        return '낮 장사 등록하기';
+      }
+
+      return '저녁 장사 등록하기';
+    }
+
+    return '등록하기';
+  }
+
+  void clearInputForSlot(HarugyeolSlot slot) {
+    switch (slot) {
+      case HarugyeolSlot.midday:
+        middayMood.value = null;
+        middayReasons.clear();
+        middayOneLineText.value = '';
+        break;
+      case HarugyeolSlot.evening:
+        eveningMood.value = null;
+        eveningReasons.clear();
+        eveningOneLineText.value = '';
+        break;
+    }
+  }
+
+  Future<void> submitVisibleInputs() async {
+    if (isSubmitting.value) return;
+
+    final slots = inputSlotsToShow;
+
+    if (slots.isEmpty || !canSubmitVisibleInputs) {
+      errorMessage.value = visibleInputSubmitBlockedMessage;
+      throw Exception(errorMessage.value);
+    }
+
+    final submitDateKey = selectedDateKey;
+
+    isSubmitting.value = true;
+    errorMessage.value = null;
+
+    try {
+      for (final slot in slots) {
+        final mood = moodForSlot(slot);
+        final reasons = reasonsForSlot(slot).toList(growable: false);
+        final text = oneLineTextForSlot(slot).trim();
+
+        if (mood == null || reasons.isEmpty) {
+          errorMessage.value = visibleInputSubmitBlockedMessage;
+          throw Exception(errorMessage.value);
+        }
+
+        await repo.submitEntry(
+          HarugyeolSubmitInput(
+            dateKey: submitDateKey,
+            slot: slot,
+            mood: mood,
+            reasons: reasons,
+            oneLineText: text,
+          ),
+        );
+
+        _applySubmittedEntryLocally(
+          dateKey: submitDateKey,
+          slot: slot,
+          mood: mood,
+          reasons: reasons,
+          oneLineText: text,
+        );
+
+        clearInputForSlot(slot);
+      }
+
+      requiredContinuationInputSlot.value = null;
+      selectedInputSlot.value = null;
+      submitSuccessMessage.value = slots.length >= 2
+          ? '낮·저녁 장사체감을 남겼어요.'
+          : '하루결을 남겼어요.';
+
+      _ensureSelectedInputSlot();
+    } catch (e) {
+      errorMessage.value = _friendlyError(e);
+      rethrow;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
   @override
   void onInit() {
     super.onInit();
 
     _refreshNowState();
-    _bindStreams();
+    _holdLoadingUntilAuthReady();
 
-    _authWorker = ever(authController.currentUser, (_) {
-      _bindStreams();
+    _authUserWorker = ever(authController.currentUser, (_) {
+      _handleAuthStateChanged();
     });
+
+    _authInitializedWorker = ever(authController.isInitialized, (_) {
+      _handleAuthStateChanged();
+    });
+
+    _authRestoringWorker = ever(authController.isRestoringCurrentUser, (_) {
+      _handleAuthStateChanged();
+    });
+
+    _handleAuthStateChanged();
   }
 
   @override
@@ -542,7 +826,9 @@ class HarugyeolController extends GetxController {
     _previousSummarySub?.cancel();
     _myEntriesSub?.cancel();
     _commentsSub?.cancel();
-    _authWorker.dispose();
+    _authUserWorker.dispose();
+    _authInitializedWorker.dispose();
+    _authRestoringWorker.dispose();
     super.onClose();
   }
 
@@ -558,22 +844,23 @@ class HarugyeolController extends GetxController {
     requiredContinuationInputSlot.value = null;
     submitSuccessMessage.value = '하루결을 남겼어요.';
 
+    middayMood.value = null;
+    middayReasons.clear();
+    middayOneLineText.value = '';
+
+    eveningMood.value = null;
+    eveningReasons.clear();
+    eveningOneLineText.value = '';
+
+    _optimisticEntriesBySlot.clear();
+
     _refreshNowState();
-    _bindStreams();
+    _bindStreamsWhenAuthReady();
   }
 
   void selectInputSlot(HarugyeolSlot slot) {
     if (!availableInputSlots.contains(slot)) return;
     if (hasSubmittedSlot(slot)) return;
-
-    if (shouldStartMiddayThenEveningFlow && slot != HarugyeolSlot.midday) {
-      return;
-    }
-
-    final requiredSlot = requiredContinuationInputSlot.value;
-    if (requiredSlot != null && canWriteSlot(requiredSlot) && slot != requiredSlot) {
-      return;
-    }
 
     selectedInputSlot.value = slot;
     selectedMood.value = null;
@@ -624,64 +911,78 @@ class HarugyeolController extends GetxController {
   @override
   Future<void> refresh() async {
     _refreshNowState();
-    _bindStreams();
+    _bindStreamsWhenAuthReady();
   }
 
   Future<void> submit() async {
     if (isSubmitting.value) return;
 
-    if (!canSubmit) {
+    final slots = inputSlotsToShow;
+
+    if (slots.isNotEmpty) {
+      await submitVisibleInputs();
+      return;
+    }
+
+    final slot = selectedInputSlot.value;
+
+    if (slot == null) {
       errorMessage.value = submitBlockedMessage;
-      throw Exception(submitBlockedMessage);
+      throw Exception(errorMessage.value);
     }
 
     final mood = selectedMood.value;
-    final slot = selectedInputSlot.value;
 
-    if (mood == null || slot == null) {
+    if (mood == null || selectedReasons.isEmpty) {
       errorMessage.value = submitBlockedMessage;
-      throw Exception(submitBlockedMessage);
+      throw Exception(errorMessage.value);
     }
 
-    final shouldContinueToEvening = _shouldContinueToEveningAfterSubmit(slot);
+    selectMoodForSlot(slot, mood);
 
-    isSubmitting.value = true;
-    errorMessage.value = null;
-
-    try {
-      await repo.submitEntry(
-        HarugyeolSubmitInput(
-          dateKey: selectedDateKey,
-          slot: slot,
-          mood: mood,
-          reasons: selectedReasons.toList(growable: false),
-          oneLineText: oneLineText.value.trim(),
-        ),
-      );
-
-      selectedMood.value = null;
-      selectedReasons.clear();
-      oneLineText.value = '';
-
-      if (shouldContinueToEvening) {
-        requiredContinuationInputSlot.value = HarugyeolSlot.evening;
-        selectedInputSlot.value = HarugyeolSlot.evening;
-        submitSuccessMessage.value = '낮 장사를 남겼어요.\n이제 저녁 장사를 입력해주세요.';
-      } else {
-        if (slot == requiredContinuationInputSlot.value ||
-            slot == HarugyeolSlot.evening) {
-          requiredContinuationInputSlot.value = null;
-        }
-
-        selectedInputSlot.value = null;
-        submitSuccessMessage.value = '하루결을 남겼어요.';
+    for (final reason in selectedReasons) {
+      if (!reasonsForSlot(slot).contains(reason)) {
+        reasonsForSlot(slot).add(reason);
       }
-    } catch (e) {
-      errorMessage.value = _friendlyError(e);
-      rethrow;
-    } finally {
-      isSubmitting.value = false;
     }
+
+    changeOneLineTextForSlot(slot, oneLineText.value);
+
+    await submitVisibleInputs();
+  }
+
+  void _applySubmittedEntryLocally({
+    required String dateKey,
+    required HarugyeolSlot slot,
+    required HarugyeolMood mood,
+    required List<HarugyeolReason> reasons,
+    required String oneLineText,
+  }) {
+    if (dateKey != selectedDateKey) return;
+
+    final now = DateTime.now();
+
+    final optimisticEntry = HarugyeolEntry(
+      id: 'local_${dateKey}_${slot.key}',
+      dateKey: dateKey,
+      userId: '',
+      authorLabel: '나',
+      industryId: null,
+      locationLabel: null,
+      isOwnerVerified: false,
+      slot: slot,
+      mood: mood,
+      score: mood.score,
+      reasons: reasons,
+      oneLineText: oneLineText,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    _optimisticEntriesBySlot[slot] = optimisticEntry;
+
+    final merged = _mergeEntriesWithOptimistic(myEntries.toList());
+    myEntries.assignAll(merged);
   }
 
   bool hasSubmittedSlot(HarugyeolSlot slot) {
@@ -693,6 +994,7 @@ class HarugyeolController extends GetxController {
     if (!isLoggedIn) return false;
     if (!availableInputSlots.contains(slot)) return false;
     if (hasSubmittedSlot(slot)) return false;
+    if (isSubmitting.value) return false;
     return true;
   }
 
@@ -903,14 +1205,15 @@ class HarugyeolController extends GetxController {
   void _ensureSelectedInputSlot() {
     _normalizeContinuationInputSlot();
 
-    final requiredSlot = requiredContinuationInputSlot.value;
-    if (requiredSlot != null && canWriteSlot(requiredSlot)) {
-      selectedInputSlot.value = requiredSlot;
+    final inputSlots = inputSlotsToShow;
+    if (inputSlots.isNotEmpty) {
+      selectedInputSlot.value = inputSlots.first;
       return;
     }
 
-    if (shouldStartMiddayThenEveningFlow) {
-      selectedInputSlot.value = HarugyeolSlot.midday;
+    final requiredSlot = requiredContinuationInputSlot.value;
+    if (requiredSlot != null && canWriteSlot(requiredSlot)) {
+      selectedInputSlot.value = requiredSlot;
       return;
     }
 
@@ -930,15 +1233,6 @@ class HarugyeolController extends GetxController {
     selectedInputSlot.value = recommended;
   }
 
-  bool _shouldContinueToEveningAfterSubmit(HarugyeolSlot submittedSlot) {
-    if (submittedSlot != HarugyeolSlot.midday) return false;
-    if (!isTodaySelected) return false;
-    if (!isLoggedIn) return false;
-    if (!availableInputSlots.contains(HarugyeolSlot.evening)) return false;
-    if (hasSubmittedSlot(HarugyeolSlot.evening)) return false;
-    return true;
-  }
-
   void _normalizeContinuationInputSlot() {
     final requiredSlot = requiredContinuationInputSlot.value;
     if (requiredSlot == null) return;
@@ -946,6 +1240,44 @@ class HarugyeolController extends GetxController {
     if (!canWriteSlot(requiredSlot)) {
       requiredContinuationInputSlot.value = null;
     }
+  }
+
+  bool get _isAuthReadyForData {
+    if (!authController.isInitialized.value) return false;
+    if (authController.isRestoringCurrentUser.value) return false;
+    return true;
+  }
+
+  void _handleAuthStateChanged() {
+    _refreshNowState();
+    _bindStreamsWhenAuthReady();
+  }
+
+  void _holdLoadingUntilAuthReady() {
+    _summarySub?.cancel();
+    _previousSummarySub?.cancel();
+    _myEntriesSub?.cancel();
+    _commentsSub?.cancel();
+
+    summary.value = null;
+    previousSummary.value = null;
+    myEntries.clear();
+    comments.clear();
+    topComments.clear();
+
+    isSummaryLoading.value = true;
+    isPreviousSummaryLoading.value = false;
+    isMyEntriesLoading.value = true;
+    isCommentsLoading.value = true;
+  }
+
+  void _bindStreamsWhenAuthReady() {
+    if (!_isAuthReadyForData) {
+      _holdLoadingUntilAuthReady();
+      return;
+    }
+
+    _bindStreams();
   }
 
   void _bindStreams() {
@@ -956,56 +1288,58 @@ class HarugyeolController extends GetxController {
     isCommentsLoading.value = true;
 
     _summarySub?.cancel();
-    _summarySub = repo
-        .watchDaySummary(dateKey)
-        .listen(
-          (value) {
-            summary.value = value;
-            isSummaryLoading.value = false;
-          },
-          onError: (e) {
-            summary.value = HarugyeolDaySummary.empty(dateKey);
-            isSummaryLoading.value = false;
-            errorMessage.value = _friendlyError(e);
-          },
-        );
+    _summarySub = repo.watchDaySummary(dateKey).listen(
+      (value) {
+        summary.value = value;
+        isSummaryLoading.value = false;
+      },
+      onError: (e) {
+        summary.value = HarugyeolDaySummary.empty(dateKey);
+        isSummaryLoading.value = false;
+        errorMessage.value = _friendlyError(e);
+      },
+    );
 
     _bindPreviousSummaryIfNeeded();
 
     _myEntriesSub?.cancel();
-    _myEntriesSub = repo
-        .watchMyEntries(dateKey)
-        .listen(
-          (items) {
-            myEntries.assignAll(items);
-            isMyEntriesLoading.value = false;
-            _ensureSelectedInputSlot();
-          },
-          onError: (e) {
-            myEntries.clear();
-            isMyEntriesLoading.value = false;
-            _ensureSelectedInputSlot();
-            errorMessage.value = _friendlyError(e);
-          },
-        );
+    _myEntriesSub = repo.watchMyEntries(dateKey).listen(
+      (items) {
+        final serverSlots = items.map((entry) => entry.slot).toSet();
+
+        _optimisticEntriesBySlot.removeWhere((slot, _) {
+          return serverSlots.contains(slot);
+        });
+
+        myEntries.assignAll(_mergeEntriesWithOptimistic(items));
+        isMyEntriesLoading.value = false;
+        _ensureSelectedInputSlot();
+      },
+      onError: (e) {
+        final merged = _mergeEntriesWithOptimistic(const <HarugyeolEntry>[]);
+
+        myEntries.assignAll(merged);
+        isMyEntriesLoading.value = false;
+        _ensureSelectedInputSlot();
+        errorMessage.value = _friendlyError(e);
+      },
+    );
 
     _commentsSub?.cancel();
-    _commentsSub = repo
-        .watchComments(dateKey)
-        .listen(
-          (items) {
-            final sorted = _sortCommentsByLike(items);
-            comments.assignAll(sorted);
-            topComments.assignAll(sorted.take(3));
-            isCommentsLoading.value = false;
-          },
-          onError: (e) {
-            comments.clear();
-            topComments.clear();
-            isCommentsLoading.value = false;
-            errorMessage.value = _friendlyError(e);
-          },
-        );
+    _commentsSub = repo.watchComments(dateKey).listen(
+      (items) {
+        final sorted = _sortCommentsByLike(items);
+        comments.assignAll(sorted);
+        topComments.assignAll(sorted.take(3));
+        isCommentsLoading.value = false;
+      },
+      onError: (e) {
+        comments.clear();
+        topComments.clear();
+        isCommentsLoading.value = false;
+        errorMessage.value = _friendlyError(e);
+      },
+    );
   }
 
   void _bindPreviousSummaryIfNeeded() {
@@ -1020,18 +1354,38 @@ class HarugyeolController extends GetxController {
     isPreviousSummaryLoading.value = true;
     final previousDateKey = dateKeyForOffset(-1);
 
-    _previousSummarySub = repo
-        .watchDaySummary(previousDateKey)
-        .listen(
-          (value) {
-            previousSummary.value = value;
-            isPreviousSummaryLoading.value = false;
-          },
-          onError: (_) {
-            previousSummary.value = HarugyeolDaySummary.empty(previousDateKey);
-            isPreviousSummaryLoading.value = false;
-          },
-        );
+    _previousSummarySub = repo.watchDaySummary(previousDateKey).listen(
+      (value) {
+        previousSummary.value = value;
+        isPreviousSummaryLoading.value = false;
+      },
+      onError: (_) {
+        previousSummary.value = HarugyeolDaySummary.empty(previousDateKey);
+        isPreviousSummaryLoading.value = false;
+      },
+    );
+  }
+
+  List<HarugyeolEntry> _mergeEntriesWithOptimistic(
+    List<HarugyeolEntry> serverItems,
+  ) {
+    final mergedBySlot = <HarugyeolSlot, HarugyeolEntry>{};
+
+    for (final item in serverItems) {
+      mergedBySlot[item.slot] = item;
+    }
+
+    for (final entry in _optimisticEntriesBySlot.values) {
+      mergedBySlot.putIfAbsent(entry.slot, () => entry);
+    }
+
+    final merged = mergedBySlot.values.toList(growable: false);
+
+    merged.sort((a, b) {
+      return a.slot.index.compareTo(b.slot.index);
+    });
+
+    return merged;
   }
 
   List<HarugyeolComment> _sortCommentsByLike(List<HarugyeolComment> source) {
@@ -1064,8 +1418,8 @@ class HarugyeolController extends GetxController {
     final displayHour = hour == 0
         ? 12
         : hour > 12
-        ? hour - 12
-        : hour;
+            ? hour - 12
+            : hour;
 
     return '$period $displayHour:$minute';
   }

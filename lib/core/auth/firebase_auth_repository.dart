@@ -55,7 +55,10 @@ class FirebaseAuthRepository implements AuthRepository {
         return;
       }
 
-      yield* _watchUserById(internalUserId);
+      yield* _watchUserById(
+        internalUserId,
+        fallbackFirebaseUid: firebaseUser.uid,
+      );
     });
   }
 
@@ -72,7 +75,10 @@ class FirebaseAuthRepository implements AuthRepository {
       return null;
     }
 
-    return _readUserById(internalUserId);
+    return _readUserById(
+      internalUserId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -92,7 +98,10 @@ class FirebaseAuthRepository implements AuthRepository {
       return null;
     }
 
-    return _readUserById(internalUserId);
+    return _readUserById(
+      internalUserId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -131,10 +140,19 @@ class FirebaseAuthRepository implements AuthRepository {
       photoUrlOverride: firebaseUser.photoURL,
     );
 
-    _cachedInternalUserId = serverUser.userId;
-    _resolveInternalUserIdFuture = Future<String?>.value(serverUser.userId);
+    final internalUserId = serverUser.userId.trim();
 
-    return _readUserById(serverUser.userId);
+    if (internalUserId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    _cachedInternalUserId = internalUserId;
+    _resolveInternalUserIdFuture = Future<String?>.value(internalUserId);
+
+    return _readUserById(
+      internalUserId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -198,10 +216,19 @@ class FirebaseAuthRepository implements AuthRepository {
       photoUrlOverride: firebaseUser.photoURL,
     );
 
-    _cachedInternalUserId = serverUser.userId;
-    _resolveInternalUserIdFuture = Future<String?>.value(serverUser.userId);
+    final internalUserId = serverUser.userId.trim();
 
-    return _readUserById(serverUser.userId);
+    if (internalUserId.isEmpty) {
+      throw Exception('Failed to resolve internal userId');
+    }
+
+    _cachedInternalUserId = internalUserId;
+    _resolveInternalUserIdFuture = Future<String?>.value(internalUserId);
+
+    return _readUserById(
+      internalUserId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -245,7 +272,10 @@ class FirebaseAuthRepository implements AuthRepository {
       throw Exception('Firebase user is null after Kakao custom token sign-in');
     }
 
-    return _readUserById(internalUserId);
+    return _readUserById(
+      internalUserId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -291,7 +321,10 @@ class FirebaseAuthRepository implements AuthRepository {
     _cachedInternalUserId = userId;
     _resolveInternalUserIdFuture = Future<String?>.value(userId);
 
-    return _readUserById(userId);
+    return _readUserById(
+      userId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -331,7 +364,10 @@ class FirebaseAuthRepository implements AuthRepository {
     _cachedInternalUserId = userId;
     _resolveInternalUserIdFuture = Future<String?>.value(userId);
 
-    return _readUserById(userId);
+    return _readUserById(
+      userId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -395,7 +431,10 @@ class FirebaseAuthRepository implements AuthRepository {
     _cachedInternalUserId = normalizedUserId;
     _resolveInternalUserIdFuture = Future<String?>.value(normalizedUserId);
 
-    return _readUserById(normalizedUserId);
+    return _readUserById(
+      normalizedUserId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
   @override
@@ -500,10 +539,16 @@ class FirebaseAuthRepository implements AuthRepository {
     _cachedInternalUserId = userId;
     _resolveInternalUserIdFuture = Future<String?>.value(userId);
 
-    return _readUserById(userId);
+    return _readUserById(
+      userId,
+      fallbackFirebaseUid: firebaseUser.uid,
+    );
   }
 
-  Stream<AppUser> _watchUserById(String userId) {
+  Stream<AppUser> _watchUserById(
+    String userId, {
+    String? fallbackFirebaseUid,
+  }) {
     final normalizedUserId = userId.trim();
 
     if (normalizedUserId.isEmpty) {
@@ -521,7 +566,11 @@ class FirebaseAuthRepository implements AuthRepository {
         throw Exception('User document does not exist');
       }
 
-      return _mapUserDocument(data);
+      return _mapUserDocument(
+        data,
+        fallbackUserId: snapshot.id,
+        fallbackFirebaseUid: fallbackFirebaseUid,
+      );
     });
   }
 
@@ -554,9 +603,14 @@ class FirebaseAuthRepository implements AuthRepository {
       throw Exception('Failed to resolve internal userId');
     }
 
+    final firebaseUid = _asString(
+      data['firebaseUid'],
+      fallback: _auth.currentUser?.uid ?? '',
+    );
+
     return AppUser(
       userId: userId,
-      firebaseUid: _asString(data['firebaseUid']),
+      firebaseUid: firebaseUid,
       provider: _asString(data['provider'], fallback: providerOverride),
       email: _asNullableString(data['email']),
       displayName: _asNullableString(data['displayName']),
@@ -594,7 +648,10 @@ class FirebaseAuthRepository implements AuthRepository {
     );
   }
 
-  Future<AppUser> _readUserById(String userId) async {
+  Future<AppUser> _readUserById(
+    String userId, {
+    String? fallbackFirebaseUid,
+  }) async {
     final normalizedUserId = userId.trim();
 
     if (normalizedUserId.isEmpty) {
@@ -612,7 +669,11 @@ class FirebaseAuthRepository implements AuthRepository {
       throw Exception('User document does not exist');
     }
 
-    return _mapUserDocument(data);
+    return _mapUserDocument(
+      data,
+      fallbackUserId: snapshot.id,
+      fallbackFirebaseUid: fallbackFirebaseUid,
+    );
   }
 
   Future<String> _signInWithKakaoAndGetAccessToken() async {
@@ -664,16 +725,23 @@ class FirebaseAuthRepository implements AuthRepository {
     } catch (_) {}
   }
 
-  AppUser _mapUserDocument(Map<String, dynamic> data) {
+  AppUser _mapUserDocument(
+    Map<String, dynamic> data, {
+    required String fallbackUserId,
+    String? fallbackFirebaseUid,
+  }) {
     final identity = _asMap(data['identity']);
     final business = _asMap(data['business']);
     final terms = _asMap(data['terms']);
     final storeProfile = _asMap(data['storeProfile']);
 
     return AppUser(
-      userId: _asString(data['userId']),
-      firebaseUid: _asString(data['firebaseUid']),
-      provider: _asString(data['provider']),
+      userId: _asString(data['userId'], fallback: fallbackUserId),
+      firebaseUid: _asString(
+        data['firebaseUid'],
+        fallback: fallbackFirebaseUid ?? '',
+      ),
+      provider: _asString(data['provider'], fallback: 'firebase'),
       email: _asNullableString(data['email']),
       displayName: _asNullableString(data['displayName']),
       photoUrl: _asNullableString(data['photoUrl']),
