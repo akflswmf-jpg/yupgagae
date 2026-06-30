@@ -23,6 +23,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const Color _kYupgagaePrimarySoft = Color(0xFFF6EEEA);
   static const Color _kTabTrackColor = Color(0xFFF8F6F5);
   static const Color _kTabTrackBorder = Color(0xFFEFE8E4);
+  static const Color _kScreenBackground = Colors.white;
 
   late final HomeFeedController controller;
   late final ScrollController _scrollController;
@@ -391,7 +392,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final title = notice?.title.trim() ?? '';
       final text = title.isEmpty ? '새 기능과 개선사항은 곧 반영됩니다.' : title;
 
-      return Padding(
+      return Container(
+        color: Colors.white,
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
         child: Material(
           color: Colors.transparent,
@@ -496,19 +498,22 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildBody() {
-    return RefreshIndicator(
-      onRefresh: controller.loadAll,
-      child: ListView(
-        controller: _scrollController,
-        physics: const AlwaysScrollableScrollPhysics(
-          parent: ClampingScrollPhysics(),
+    return ColoredBox(
+      color: Colors.white,
+      child: RefreshIndicator(
+        onRefresh: controller.loadAll,
+        child: ListView(
+          controller: _scrollController,
+          physics: const AlwaysScrollableScrollPhysics(
+            parent: ClampingScrollPhysics(),
+          ),
+          children: [
+            _buildTopBars(),
+            _buildTabs(),
+            _buildFeedSection(),
+            const SizedBox(height: 24),
+          ],
         ),
-        children: [
-          _buildTopBars(),
-          _buildTabs(),
-          _buildFeedSection(),
-          const SizedBox(height: 24),
-        ],
       ),
     );
   }
@@ -516,11 +521,12 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF9FAFB),
+      backgroundColor: _kScreenBackground,
       appBar: AppBar(
         toolbarHeight: 0,
         elevation: 0,
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
       ),
       body: _buildBody(),
     );
